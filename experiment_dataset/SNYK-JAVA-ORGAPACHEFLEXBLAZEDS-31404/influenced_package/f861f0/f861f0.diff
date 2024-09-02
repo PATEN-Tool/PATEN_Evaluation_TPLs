@@ -1,0 +1,962 @@
+diff --git a/core/src/main/java/flex/messaging/MessageBroker.java b/core/src/main/java/flex/messaging/MessageBroker.java
+index 80b061e0..3ffd2e48 100644
+--- a/core/src/main/java/flex/messaging/MessageBroker.java
++++ b/core/src/main/java/flex/messaging/MessageBroker.java
+@@ -57,6 +57,7 @@
+ import flex.messaging.util.StringUtils;
+ import flex.messaging.util.UUIDGenerator;
+ import flex.messaging.util.UUIDUtils;
++import flex.messaging.validators.ClassDeserializationValidator;
+ import flex.messaging.validators.DeserializationValidator;
+ 
+ import javax.servlet.ServletContext;
+diff --git a/core/src/main/java/flex/messaging/config/ServerConfigurationParser.java b/core/src/main/java/flex/messaging/config/ServerConfigurationParser.java
+index 9ff3e1c2..e8eb1a97 100644
+--- a/core/src/main/java/flex/messaging/config/ServerConfigurationParser.java
++++ b/core/src/main/java/flex/messaging/config/ServerConfigurationParser.java
+@@ -16,6 +16,7 @@
+  */
+ package flex.messaging.config;
+ 
++import flex.messaging.validators.ClassDeserializationValidator;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Node;
+ import org.w3c.dom.NodeList;
+@@ -1865,21 +1866,37 @@ private void messageFilter(Node messageFilter, String filterType)
+     private void validators(Node root)
+     {
+         Node validatorsNode = selectSingleNode(root, VALIDATORS_ELEMENT);
+-        if (validatorsNode == null)
++        if (validatorsNode == null) {
++            // Default to the ClassDeserializationValidator
++            defaultValidator();
+             return;
++        }
+ 
+         // Validation
+         allowedChildElements(validatorsNode, VALIDATORS_CHILDREN);
+ 
+         // Validator
+         NodeList validators = selectNodeList(validatorsNode, VALIDATOR_ELEMENT);
+-        for (int i = 0; i < validators.getLength(); i++)
+-        {
+-            Node validator = validators.item(i);
+-            validator(validator);
++        if(validators.getLength() > 0) {
++            for (int i = 0; i < validators.getLength(); i++) {
++                Node validator = validators.item(i);
++                validator(validator);
++            }
++        } else {
++            // Default to the ClassDeserializationValidator
++            defaultValidator();
+         }
+     }
+ 
++    /**
++     * Initialize a efault validator that protects BlazeDS against the most obvious attacks.
++     */
++    private void defaultValidator() {
++        ValidatorSettings validatorSettings = new ValidatorSettings();
++        validatorSettings.setClassName(ClassDeserializationValidator.class.getName());
++        ((MessagingConfiguration)config).addValidatorSettings(validatorSettings);
++    }
++
+     private void validator(Node validator)
+     {
+         // Validation
+diff --git a/core/src/main/java/flex/messaging/io/SerializationContext.java b/core/src/main/java/flex/messaging/io/SerializationContext.java
+index 79bb2d71..64196ccc 100644
+--- a/core/src/main/java/flex/messaging/io/SerializationContext.java
++++ b/core/src/main/java/flex/messaging/io/SerializationContext.java
+@@ -17,6 +17,7 @@
+ package flex.messaging.io;
+ 
+ import flex.messaging.util.ClassUtil;
++import flex.messaging.validators.ClassDeserializationValidator;
+ import flex.messaging.validators.DeserializationValidator;
+ 
+ import java.io.Serializable;
+diff --git a/core/src/main/java/flex/messaging/validators/ClassDeserializationValidator.java b/core/src/main/java/flex/messaging/validators/ClassDeserializationValidator.java
+index cf079429..ed2ac80c 100644
+--- a/core/src/main/java/flex/messaging/validators/ClassDeserializationValidator.java
++++ b/core/src/main/java/flex/messaging/validators/ClassDeserializationValidator.java
+@@ -16,23 +16,18 @@
+  */
+ package flex.messaging.validators;
+ 
+-import java.util.HashMap;
+-import java.util.HashSet;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.Set;
+-import java.util.regex.Pattern;
+-
+ import flex.messaging.config.ConfigMap;
+ 
++import java.util.*;
++import java.util.regex.Pattern;
++
+ /**
+  * The <code>ClassDeserializationValidator</code> is provided as a default
+  * implementation of <code>DeserializationValidator</code> and it simply
+  * validates the creation of allowed and disallowed classes as specified in
+  * the configuration.
+  */
+-public class ClassDeserializationValidator implements DeserializationValidator
+-{
++public class ClassDeserializationValidator implements DeserializationValidator {
+     //--------------------------------------------------------------------------
+     //
+     // Public Static Constants
+@@ -43,25 +38,36 @@ public class ClassDeserializationValidator implements DeserializationValidator
+     public static final String PROPERTY_DISALLOW_CLASSES = "disallow-classes";
+     public static final String PROPERTY_CLASS_ATTR = "class";
+     public static final String PROPERTY_NAME_ATTR = "name";
+-    
+-    private static final String [] DEFAULT_ALLOW_CLASSES = {
+-        "flex.messaging.*",  
+-        "flex.data.*",  
+-        "java.lang.Boolean",  
+-        "java.lang.Byte",  
+-        "java.lang.Character",  
+-        "java.lang.Double",  
+-        "java.lang.Float",  
+-        "java.lang.Integer",  
+-        "java.lang.Long",  
+-        "java.lang.Object",  
+-        "java.lang.Short",  
+-        "java.lang.String",  
+-        "java.io.Externalizable",  
+-        "java.util.*",
+-        "org.w3c.dom.Document",
+-        "\\[B",  
+-        "\\[Ljava.lang.Object;"  
++
++    private static final String[] DEFAULT_ALLOW_CLASSES = {
++            "flex.messaging.io.amf.SerializedObject",
++            "flex.messaging.io.ArrayCollection",
++            "flex.messaging.io.ObjectProxy",
++            "flex.messaging.io.SerializationProxy",
++            "flex.messaging.messages.AcknowledgeMessageExt",
++            "flex.messaging.messages.AsyncMessageExt",
++            "flex.messaging.messages.CommandMessageExt",
++            "flex.data.messages.DataMessageExt",
++            "flex.data.messages.ManagedRemotingMessageExt",
++            "flex.data.messages.PagedMessageExt",
++            "flex.data.messages.SequencedMessageExt",
++            "flex.data.messages.UpdateCollectionMessageExt",
++            "flex.data.ChangedItems",
++            "java.lang.Boolean",
++            "java.lang.Byte",
++            "java.lang.Character",
++            "java.lang.Double",
++            "java.lang.Float",
++            "java.lang.Integer",
++            "java.lang.Long",
++            "java.lang.Object",
++            "java.lang.Short",
++            "java.lang.String",
++            "java.io.Externalizable",
++            "java.util.Date",
++            "org.w3c.dom.Document",
++            "\\[B",
++            "\\[Ljava.lang.Object;"
+     };
+ 
+     //--------------------------------------------------------------------------
+@@ -87,6 +93,10 @@ public class ClassDeserializationValidator implements DeserializationValidator
+     private Map<String, Pattern> allowClassPatterns;
+     private Map<String, Pattern> disallowClassPatterns;
+ 
++    public ClassDeserializationValidator() {
++    }
++
++
+     //--------------------------------------------------------------------------
+     //
+     // Public Methods
+@@ -98,10 +108,8 @@ public class ClassDeserializationValidator implements DeserializationValidator
+      *
+      * @param classNamePattern The name of the class which can be a regular expression.
+      */
+-    public void addAllowClassPattern(String classNamePattern)
+-    {
+-        synchronized (lock)
+-        {
++    public void addAllowClassPattern(String classNamePattern) {
++        synchronized (lock) {
+             if (allowClassPatterns == null)
+                 allowClassPatterns = new HashMap<String, Pattern>();
+ 
+@@ -116,10 +124,8 @@ public void addAllowClassPattern(String classNamePattern)
+      *
+      * @param classNamePattern The name of the class which can be a regular expression.
+      */
+-    public void removeAllowClassPattern(String classNamePattern)
+-    {
+-        synchronized (lock)
+-        {
++    public void removeAllowClassPattern(String classNamePattern) {
++        synchronized (lock) {
+             if (allowClassPatterns != null)
+                 allowClassPatterns.remove(classNamePattern);
+ 
+@@ -132,10 +138,8 @@ public void removeAllowClassPattern(String classNamePattern)
+      *
+      * @param classNamePattern The name of the class which can be a regular expression.
+      */
+-    public void addDisallowClassPattern(String classNamePattern)
+-    {
+-        synchronized (lock)
+-        {
++    public void addDisallowClassPattern(String classNamePattern) {
++        synchronized (lock) {
+             if (disallowClassPatterns == null)
+                 disallowClassPatterns = new HashMap<String, Pattern>();
+ 
+@@ -150,10 +154,8 @@ public void addDisallowClassPattern(String classNamePattern)
+      *
+      * @param classNamePattern The name of the class which can be a regular expression.
+      */
+-    public void removeDisallowClassPattern(String classNamePattern)
+-    {
+-        synchronized (lock)
+-        {
++    public void removeDisallowClassPattern(String classNamePattern) {
++        synchronized (lock) {
+             if (disallowClassPatterns != null)
+                 disallowClassPatterns.remove(classNamePattern);
+ 
+@@ -167,12 +169,11 @@ public void removeDisallowClassPattern(String classNamePattern)
+      * therefore this method always returns true.
+      *
+      * @param instance The Array or List instance.
+-     * @param index The index at which the value is being assigned.
+-     * @param value The value that is assigned to the index.
++     * @param index    The index at which the value is being assigned.
++     * @param value    The value that is assigned to the index.
+      * @return True.
+      */
+-    public boolean validateAssignment(Object instance, int index, Object value)
+-    {
++    public boolean validateAssignment(Object instance, int index, Object value) {
+         return true;
+     }
+ 
+@@ -181,13 +182,12 @@ public boolean validateAssignment(Object instance, int index, Object value)
+      * to a value but this class only deals with class creations, therefore this
+      * method always returns true.
+      *
+-     * @param instance The instance with the property that is being assigned a new value.
++     * @param instance     The instance with the property that is being assigned a new value.
+      * @param propertyName The name of the property that is being assigned.
+-     * @param value The value that the property is being assigned to.
++     * @param value        The value that the property is being assigned to.
+      * @return True.
+      */
+-    public boolean validateAssignment(Object instance, String propertyName, Object value)
+-    {
++    public boolean validateAssignment(Object instance, String propertyName, Object value) {
+         return true;
+     }
+ 
+@@ -199,9 +199,8 @@ public boolean validateAssignment(Object instance, String propertyName, Object v
+      * @param c The class that is being created.
+      * @return True if the creation is valid.
+      */
+-    public boolean validateCreation(Class<?> c)
+-    {
+-        String className = c == null? null : c.getName();
++    public boolean validateCreation(Class<?> c) {
++        String className = c == null ? null : c.getName();
+         if (className == null)
+             return true;
+ 
+@@ -217,12 +216,9 @@ public boolean validateCreation(Class<?> c)
+         // go through the disallow and allow class patterns list.
+ 
+         // Disallow the class if there's a disallow-classes list, and the class is in that list.
+-        if (disallowClassPatterns != null && !disallowClassPatterns.isEmpty())
+-        {
+-            for (Pattern pattern : disallowClassPatterns.values())
+-            {
+-                if (pattern.matcher(className).matches())
+-                {
++        if (disallowClassPatterns != null && !disallowClassPatterns.isEmpty()) {
++            for (Pattern pattern : disallowClassPatterns.values()) {
++                if (pattern.matcher(className).matches()) {
+                     addDisallowClass(className);
+                     return false;
+                 }
+@@ -230,12 +226,9 @@ public boolean validateCreation(Class<?> c)
+         }
+ 
+         // Disallow the class if there's an allowed-classes list, and the class is NOT in that list.
+-        if (allowClassPatterns != null && !allowClassPatterns.isEmpty())
+-        {
+-            for (Pattern pattern : allowClassPatterns.values())
+-            {
+-                if (pattern.matcher(className).matches())
+-                {
++        if (allowClassPatterns != null && !allowClassPatterns.isEmpty()) {
++            for (Pattern pattern : allowClassPatterns.values()) {
++                if (pattern.matcher(className).matches()) {
+                     addAllowClass(className);
+                     return true;
+                 }
+@@ -250,28 +243,25 @@ public boolean validateCreation(Class<?> c)
+         return true;
+     }
+ 
+-    /** {@inheritDoc} */
+-    public void initialize(String id, ConfigMap properties)
+-    {
++    /**
++     * {@inheritDoc}
++     */
++    public void initialize(String id, ConfigMap properties) {
+         // Apply default allow classes
+-        for (String defaultAllowClassPattern : DEFAULT_ALLOW_CLASSES)
+-        {
++        for (String defaultAllowClassPattern : DEFAULT_ALLOW_CLASSES) {
+             addAllowClassPattern(defaultAllowClassPattern);
+         }
+-        
++
+         if (properties == null || properties.size() == 0)
+             return;
+ 
+         // Process allow-classes.
+         ConfigMap allowedClassesMap = properties.getPropertyAsMap(PROPERTY_ALLOW_CLASSES, null);
+-        if (allowedClassesMap != null && !allowedClassesMap.isEmpty())
+-        {
++        if (allowedClassesMap != null && !allowedClassesMap.isEmpty()) {
+             List<?> names = allowedClassesMap.getPropertyAsList(PROPERTY_CLASS_ATTR, null);
+-            if (names != null && !names.isEmpty())
+-            {
+-                for (Object element : names)
+-                {
+-                    String name = ((ConfigMap)element).getProperty(PROPERTY_NAME_ATTR);
++            if (names != null && !names.isEmpty()) {
++                for (Object element : names) {
++                    String name = ((ConfigMap) element).getProperty(PROPERTY_NAME_ATTR);
+                     addAllowClassPattern(name);
+                 }
+             }
+@@ -279,14 +269,11 @@ public void initialize(String id, ConfigMap properties)
+ 
+         // Process disallow-classes.
+         ConfigMap disallowedClassesMap = properties.getPropertyAsMap(PROPERTY_DISALLOW_CLASSES, null);
+-        if (disallowedClassesMap != null && !disallowedClassesMap.isEmpty())
+-        {
++        if (disallowedClassesMap != null && !disallowedClassesMap.isEmpty()) {
+             List<?> names = disallowedClassesMap.getPropertyAsList(PROPERTY_CLASS_ATTR, null);
+-            if (names != null && !names.isEmpty())
+-            {
+-                for (Object element : names)
+-                {
+-                    String name = ((ConfigMap)element).getProperty(PROPERTY_NAME_ATTR);
++            if (names != null && !names.isEmpty()) {
++                for (Object element : names) {
++                    String name = ((ConfigMap) element).getProperty(PROPERTY_NAME_ATTR);
+                     addDisallowClassPattern(name);
+                 }
+             }
+@@ -299,10 +286,8 @@ public void initialize(String id, ConfigMap properties)
+     //
+     //--------------------------------------------------------------------------
+ 
+-    protected void addAllowClass(String className)
+-    {
+-        synchronized (lock)
+-        {
++    protected void addAllowClass(String className) {
++        synchronized (lock) {
+             if (allowClasses == null)
+                 allowClasses = new HashSet<String>();
+ 
+@@ -311,10 +296,8 @@ protected void addAllowClass(String className)
+         }
+     }
+ 
+-    protected void addDisallowClass(String className)
+-    {
+-        synchronized (lock)
+-        {
++    protected void addDisallowClass(String className) {
++        synchronized (lock) {
+             if (disallowClasses == null)
+                 disallowClasses = new HashSet<String>();
+ 
+@@ -322,15 +305,12 @@ protected void addDisallowClass(String className)
+                 disallowClasses.add(className);
+         }
+     }
+-    
+-    protected void clearClassCache()
+-    {
+-        if (allowClasses != null)
+-        {
++
++    protected void clearClassCache() {
++        if (allowClasses != null) {
+             allowClasses.clear();
+         }
+-        if (disallowClasses != null)
+-        {
++        if (disallowClasses != null) {
+             disallowClasses.clear();
+         }
+     }
+diff --git a/remoting/src/test/java/flex/messaging/io/amf/client/AMFConnectionIT.java b/remoting/src/test/java/flex/messaging/io/amf/client/AMFConnectionIT.java
+index 134315c7..b2d3befe 100644
+--- a/remoting/src/test/java/flex/messaging/io/amf/client/AMFConnectionIT.java
++++ b/remoting/src/test/java/flex/messaging/io/amf/client/AMFConnectionIT.java
+@@ -28,7 +28,7 @@
+ import junit.framework.TestCase;
+ import junit.framework.TestSuite;
+ 
+-import amfclient.ClientCustomType;
++import remoting.amfclient.ClientCustomType;
+ 
+ import flex.messaging.MessageException;
+ import flex.messaging.messages.RemotingMessage;
+@@ -116,7 +116,7 @@ protected void setUp() throws Exception {
+                 }
+                 AMFConnection.registerAlias(
+                         "remoting.amfclient.ServerCustomType" /* server type */,
+-                        "amfclient.ClientCustomType" /* client type */);
++                        "remoting.amfclient.ClientCustomType" /* client type */);
+             }
+             protected void tearDown() throws Exception {
+                 serverWrapper.stopServer();
+@@ -329,11 +329,9 @@ public void testCallUnreachableConnectUrl()
+     public void testCallNonexistantMethod()
+     {
+         String method = "nonExistantMethod";
+-        final ClientCustomType methodArg = new ClientCustomType();
+-        methodArg.setId(1);
+         try
+         {
+-            internalTestCall(getOperationCall(method), methodArg, new CallResultHandler(){
++            internalTestCall(getOperationCall(method), "Wombat", new CallResultHandler(){
+                 public void onResult(Object result)
+                 {
+                     fail("Unexcepted result: " + result);
+@@ -382,6 +380,7 @@ public void onResult(Object result)
+             fail(UNEXPECTED_EXCEPTION_STRING + e);
+         }
+     }
++
+     public void testCloseNoConnect()
+     {
+         AMFConnection amfConnection = new AMFConnection();
+diff --git a/remoting/src/test/java/flex/messaging/io/amf/client/AMFDataTypeIT.java b/remoting/src/test/java/flex/messaging/io/amf/client/AMFDataTypeIT.java
+index 0347a201..d9d9058b 100644
+--- a/remoting/src/test/java/flex/messaging/io/amf/client/AMFDataTypeIT.java
++++ b/remoting/src/test/java/flex/messaging/io/amf/client/AMFDataTypeIT.java
+@@ -29,7 +29,7 @@
+ import junit.framework.TestCase;
+ import junit.framework.TestSuite;
+ 
+-import amfclient.ClientCustomType;
++import remoting.amfclient.ClientCustomType;
+ 
+ import flex.messaging.io.amf.client.exceptions.ClientStatusException;
+ import flex.messaging.io.amf.client.exceptions.ServerStatusException;
+@@ -47,9 +47,12 @@ public class AMFDataTypeIT extends TestCase
+     private static final String DEFAULT_URL = "http://localhost:%s/qa-regress/messagebroker/amf";
+     private static final String DEFAULT_AMF_OPERATION = getOperationCall(DEFAULT_METHOD_NAME);
+     private static final String UNEXPECTED_EXCEPTION_STRING = "Unexpected exception: ";
++    private static final String UNEXPECTED_SUCCESS_STRING = "Unexpected success of previous operation";
+ 
+-    private static TestServerWrapper serverWrapper;
+-    private static int serverPort;
++    private static TestServerWrapper standardValidationServerWrapper;
++    private static int standardValidationServerPort;
++    private static TestServerWrapper customValidationServerWrapper;
++    private static int customValidationServerPort;
+     private static SerializationContext serializationContext;
+ 
+     /**
+@@ -61,10 +64,13 @@ private static String getOperationCall(String method)
+         return DEFAULT_DESTINATION_ID + "." + method;
+     }
+ 
+-    protected String getConnectionUrl() {
+-        return String.format(DEFAULT_URL, serverPort);
++    protected String getStandardValidationConnectionUrl() {
++        return String.format(DEFAULT_URL, standardValidationServerPort);
+     }
+ 
++    protected String getCustomValidationConnectionUrl() {
++        return String.format(DEFAULT_URL, customValidationServerPort);
++    }
+ 
+     public AMFDataTypeIT(String name)
+     {
+@@ -93,17 +99,29 @@ public static Test suite()
+         suite.addTest(new AMFDataTypeIT("testXMLDocumentEnabledXml"));
+         suite.addTest(new AMFDataTypeIT("testXMLDocumentDisabledXml"));
+ 
++        suite.addTest(new AMFDataTypeIT("testCallObjectArgObjectReturnCustomizedValidation"));
++        suite.addTest(new AMFDataTypeIT("testCallCustomArgObjectReturnCustomizedValidation"));
++        suite.addTest(new AMFDataTypeIT("testCallObjectArgCustomReturnCustomizedValidation"));
++        suite.addTest(new AMFDataTypeIT("testCallCustomArgCustomReturnCustomizedValidation"));
++        suite.addTest(new AMFDataTypeIT("testCallObjectArrayArgObjectArrayReturnCustomizedValidation"));
+ 
+         return new TestSetup(suite) {
+             protected void setUp() throws Exception {
+-                serverWrapper = new TestServerWrapper();
+-                serverPort = serverWrapper.startServer("classpath:/WEB-INF/flex/services-config.xml");
+-                if(serverPort == -1) {
+-                    Assert.fail("Couldn't start server process");
++                standardValidationServerWrapper = new TestServerWrapper();
++                standardValidationServerPort = standardValidationServerWrapper.startServer("classpath:/WEB-INF/flex/services-config.xml");
++                if(standardValidationServerPort == -1) {
++                    Assert.fail("Couldn't start server (standard validation) process");
++                }
++
++                customValidationServerWrapper = new TestServerWrapper();
++                customValidationServerPort = customValidationServerWrapper.startServer("classpath:/WEB-INF/flex/services-config-customized-validation.xml");
++                if(customValidationServerPort == -1) {
++                    Assert.fail("Couldn't start server (custom validation) process");
+                 }
++
+                 AMFConnection.registerAlias(
+                         "remoting.amfclient.ServerCustomType" /* server type */,
+-                        "amfclient.ClientCustomType" /* client type */);
++                        "remoting.amfclient.ClientCustomType" /* client type */);
+ 
+                 serializationContext = new SerializationContext();
+                 serializationContext.createASObjectForMissingType = true;
+@@ -117,8 +135,10 @@ protected void setUp() throws Exception {
+                 serializationContext.allowXml = false;
+             }
+             protected void tearDown() throws Exception {
+-                serverWrapper.stopServer();
+-                serverWrapper = null;
++                standardValidationServerWrapper.stopServer();
++                standardValidationServerWrapper = null;
++                customValidationServerWrapper.stopServer();
++                customValidationServerWrapper = null;
+             }
+         };
+     }
+@@ -132,7 +152,7 @@ public void onResult(Object result)
+                 {
+                     Assert.assertEquals(DEFAULT_METHOD_ARG, result);
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -151,7 +171,7 @@ public void onResult(Object result)
+                 {
+                     Assert.assertEquals(methodArg, ((Double)result).intValue());
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -170,7 +190,7 @@ public void onResult(Object result)
+                 {
+                     Assert.assertEquals(methodArg, result);
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -189,7 +209,7 @@ public void onResult(Object result)
+                 {
+                     Assert.assertEquals(methodArg, result);
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -208,7 +228,7 @@ public void onResult(Object result)
+                 {
+                     Assert.assertEquals(methodArg, ((Double)result).shortValue());
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -227,7 +247,7 @@ public void onResult(Object result)
+                 {
+                     Assert.assertEquals(methodArg, result);
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -249,7 +269,30 @@ public void onResult(Object result)
+                     ClientCustomType temp2 = (ClientCustomType)result;
+                     Assert.assertEquals(1, temp2.getId());
+                 }
+-            });
++            }, false);
++            fail(UNEXPECTED_SUCCESS_STRING);
++        }
++        catch (Exception e)
++        {
++            // An exception is what we expect here.
++        }
++    }
++
++    public void testCallObjectArgObjectReturnCustomizedValidation()
++    {
++        String method = "echoObject1";
++        ClientCustomType temp = new ClientCustomType();
++        temp.setId(1);
++        final Object methodArg = temp;
++        try
++        {
++            internalTestCall(getOperationCall(method), methodArg, new CallResultHandler(){
++                public void onResult(Object result)
++                {
++                    ClientCustomType temp2 = (ClientCustomType)result;
++                    Assert.assertEquals(1, temp2.getId());
++                }
++            }, true);
+         }
+         catch (Exception e)
+         {
+@@ -271,7 +314,30 @@ public void onResult(Object result)
+                     ClientCustomType temp2 = (ClientCustomType)result;
+                     Assert.assertEquals(1, temp2.getId());
+                 }
+-            });
++            }, false);
++            fail(UNEXPECTED_SUCCESS_STRING);
++        }
++        catch (Exception e)
++        {
++            // An exception is what we expect here.
++        }
++    }
++
++    public void testCallObjectArgCustomReturnCustomizedValidation()
++    {
++        String method = "echoObject2";
++        ClientCustomType temp = new ClientCustomType();
++        temp.setId(1);
++        final Object methodArg = temp;
++        try
++        {
++            internalTestCall(getOperationCall(method), methodArg, new CallResultHandler(){
++                public void onResult(Object result)
++                {
++                    ClientCustomType temp2 = (ClientCustomType)result;
++                    Assert.assertEquals(1, temp2.getId());
++                }
++            }, true);
+         }
+         catch (Exception e)
+         {
+@@ -292,7 +358,29 @@ public void onResult(Object result)
+                     ClientCustomType temp2 = (ClientCustomType)result;
+                     Assert.assertEquals(1, temp2.getId());
+                 }
+-            });
++            }, false);
++            fail(UNEXPECTED_SUCCESS_STRING);
++        }
++        catch (Exception e)
++        {
++            // An exception is what we expect here.
++        }
++    }
++
++    public void testCallCustomArgObjectReturnCustomizedValidation()
++    {
++        String method = "echoObject3";
++        final ClientCustomType methodArg = new ClientCustomType();
++        methodArg.setId(1);
++        try
++        {
++            internalTestCall(getOperationCall(method), methodArg, new CallResultHandler(){
++                public void onResult(Object result)
++                {
++                    ClientCustomType temp2 = (ClientCustomType)result;
++                    Assert.assertEquals(1, temp2.getId());
++                }
++            }, true);
+         }
+         catch (Exception e)
+         {
+@@ -313,7 +401,29 @@ public void onResult(Object result)
+                     ClientCustomType temp2 = (ClientCustomType)result;
+                     Assert.assertEquals(1, temp2.getId());
+                 }
+-            });
++            }, false);
++            fail(UNEXPECTED_SUCCESS_STRING);
++        }
++        catch (Exception e)
++        {
++            // An exception is what we expect here.
++        }
++    }
++
++    public void testCallCustomArgCustomReturnCustomizedValidation()
++    {
++        String method = "echoObject4";
++        final ClientCustomType methodArg = new ClientCustomType();
++        methodArg.setId(1);
++        try
++        {
++            internalTestCall(getOperationCall(method), methodArg, new CallResultHandler(){
++                public void onResult(Object result)
++                {
++                    ClientCustomType temp2 = (ClientCustomType)result;
++                    Assert.assertEquals(1, temp2.getId());
++                }
++            }, true);
+         }
+         catch (Exception e)
+         {
+@@ -332,7 +442,7 @@ public void onResult(Object result)
+                     ClientCustomType temp2 = (ClientCustomType)result;
+                     Assert.assertEquals(1, temp2.getId());
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -351,7 +461,7 @@ public void onResult(Object result)
+                     ClientCustomType temp2 = (ClientCustomType)result;
+                     Assert.assertEquals(1, temp2.getId());
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -374,7 +484,7 @@ public void onResult(Object result)
+                         Assert.assertEquals(i, temp2.getId());
+                     }
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -397,7 +507,7 @@ public void onResult(Object result)
+                         Assert.assertEquals(i, ((Integer)temp.get(i)).intValue());
+                     }
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -428,7 +538,39 @@ public void onResult(Object result)
+                         Assert.assertEquals(i, temp2.getId());
+                     }
+                 }
+-            });
++            }, false);
++            fail(UNEXPECTED_SUCCESS_STRING);
++        }
++        catch (Exception e)
++        {
++            // An exception is what we expect here.
++        }
++    }
++
++    public void testCallObjectArrayArgObjectArrayReturnCustomizedValidation()
++    {
++        String method = "echoObject1";
++        Object[] temp = new Object[3];
++        for (int i = 0; i < temp.length; i++)
++        {
++            ClientCustomType cct = new ClientCustomType();
++            cct.setId(i);
++            temp[i] = cct;
++        }
++        final Object[] methodArg = temp;
++        try
++        {
++            internalTestCall(getOperationCall(method), methodArg, new CallResultHandler(){
++                public void onResult(Object result)
++                {
++                    List temp = (List)result;
++                    for (int i = 0; i < temp.size(); i++)
++                    {
++                        ClientCustomType temp2 = (ClientCustomType)temp.get(i);
++                        Assert.assertEquals(i, temp2.getId());
++                    }
++                }
++            }, true);
+         }
+         catch (Exception e)
+         {
+@@ -464,7 +606,7 @@ public void onResult(Object result)
+                         fail(UNEXPECTED_EXCEPTION_STRING + e);
+                     }
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -501,7 +643,7 @@ public void onResult(Object result)
+                         fail(UNEXPECTED_EXCEPTION_STRING + e);
+                     }
+                 }
+-            });
++            }, false);
+         }
+         catch (Exception e)
+         {
+@@ -517,11 +659,15 @@ private interface CallResultHandler
+ 
+     // Helper method used by JUnit tests to pass in an operation and method argument
+     // When the AMF call returns, CallResultHandler.onResult is called to Assert things.
+-    private void internalTestCall(String operation, Object methodArg, CallResultHandler resultHandler) throws ClientStatusException, ServerStatusException
++    private void internalTestCall(String operation, Object methodArg, CallResultHandler resultHandler, boolean customizedValidation) throws ClientStatusException, ServerStatusException
+     {
+         AMFConnection amfConnection = new AMFConnection();
+         // Connect.
+-        amfConnection.connect(getConnectionUrl(), serializationContext);
++        if(customizedValidation) {
++            amfConnection.connect(getCustomValidationConnectionUrl(), serializationContext);
++        } else {
++            amfConnection.connect(getStandardValidationConnectionUrl(), serializationContext);
++        }
+         // Make a remoting call and retrieve the result.
+         Object result;
+         if (methodArg == null)
+diff --git a/remoting/src/test/java/flex/messaging/util/TestServerWrapper.java b/remoting/src/test/java/flex/messaging/util/TestServerWrapper.java
+index ca1c17ba..4dc3c022 100644
+--- a/remoting/src/test/java/flex/messaging/util/TestServerWrapper.java
++++ b/remoting/src/test/java/flex/messaging/util/TestServerWrapper.java
+@@ -19,6 +19,9 @@
+ import java.io.BufferedReader;
+ import java.io.IOException;
+ import java.io.InputStreamReader;
++import java.util.Collections;
++import java.util.LinkedList;
++import java.util.List;
+ 
+ /**
+  * Simple little wrapper starting up a BlazeDS server in a separate VM useful for unit testing the
+@@ -37,11 +40,17 @@ public int startServer(String configPath) {
+         final String separator = System.getProperty("file.separator");
+         final String classpath = System.getProperty("java.class.path");
+         final String path = System.getProperty("java.home") + separator + "bin" + separator + "java";
++        List<String> args = new LinkedList<String>();
++        args.add(path);
++/*        if(configPath.contains("customized-validation")) {
++            args.add("-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005");
++        }*/
++        args.add("-cp");
++        args.add(classpath);
++        args.add(TestServer.class.getCanonicalName());
++        args.add(configPath);
+         System.out.print("Starting test-server");
+-        final ProcessBuilder processBuilder = new ProcessBuilder(path,
+-                //"-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=5005",
+-                "-cp", /*"\"" +*/ classpath /*+ "\""*/,
+-                TestServer.class.getCanonicalName(), /*"\"" +*/ configPath /*+ "\""*/);
++        final ProcessBuilder processBuilder = new ProcessBuilder(args.toArray(new String[0]));
+         processBuilder.redirectErrorStream(true);
+         try {
+             serverProcess = processBuilder.start();
+diff --git a/remoting/src/test/java/amfclient/ClientCustomType.java b/remoting/src/test/java/remoting/amfclient/ClientCustomType.java
+similarity index 97%
+rename from remoting/src/test/java/amfclient/ClientCustomType.java
+rename to remoting/src/test/java/remoting/amfclient/ClientCustomType.java
+index 0e5bd467..2023bdfc 100644
+--- a/remoting/src/test/java/amfclient/ClientCustomType.java
++++ b/remoting/src/test/java/remoting/amfclient/ClientCustomType.java
+@@ -14,7 +14,7 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
+-package amfclient;
++package remoting.amfclient;
+ 
+ /**
+  * The client side object used by the AMFConnectionIT. There is a corresponding
+diff --git a/remoting/src/test/resources/WEB-INF/flex/services-config-customized-validation.xml b/remoting/src/test/resources/WEB-INF/flex/services-config-customized-validation.xml
+new file mode 100644
+index 00000000..9832eff0
+--- /dev/null
++++ b/remoting/src/test/resources/WEB-INF/flex/services-config-customized-validation.xml
+@@ -0,0 +1,65 @@
++<?xml version="1.0" encoding="UTF-8"?>
++<!--
++
++  Licensed to the Apache Software Foundation (ASF) under one or more
++  contributor license agreements.  See the NOTICE file distributed with
++  this work for additional information regarding copyright ownership.
++  The ASF licenses this file to You under the Apache License, Version 2.0
++  (the "License"); you may not use this file except in compliance with
++  the License.  You may obtain a copy of the License at
++
++      http://www.apache.org/licenses/LICENSE-2.0
++
++  Unless required by applicable law or agreed to in writing, software
++  distributed under the License is distributed on an "AS IS" BASIS,
++  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++  See the License for the specific language governing permissions and
++  limitations under the License.
++
++-->
++<services-config>
++
++    <validators>
++        <validator class="flex.messaging.validators.ClassDeserializationValidator">
++            <properties>
++                <allow-classes>
++                    <class name="remoting.amfclient.ClientCustomType"/>
++                    <class name="remoting.amfclient.ServerCustomType"/>
++                </allow-classes>
++            </properties>
++        </validator>
++    </validators>
++
++    <services>
++        <service-include file-path="remoting-config.xml" />
++    </services>
++
++    <channels>
++        <channel-definition id="amf" class="mx.messaging.channels.AMFChannel">
++            <endpoint url="http://{server.name}:{server.port}/{context.root}/messagebroker/amf" class="flex.messaging.endpoints.AMFEndpoint"/>
++            <properties>
++                <serialization>
++                    <allow-xml>true</allow-xml>
++                </serialization>
++            </properties>
++        </channel-definition>
++    </channels>
++
++    <logging>
++        <target class="flex.messaging.log.ConsoleTarget" level="Error">
++            <properties>
++                <prefix>[BlazeDS] </prefix>
++                <includeDate>false</includeDate>
++                <includeTime>false</includeTime>
++                <includeLevel>false</includeLevel>
++                <includeCategory>false</includeCategory>
++            </properties>
++            <filters>
++                <pattern>Endpoint.*</pattern>
++                <pattern>Service.*</pattern>
++                <pattern>Configuration</pattern>
++            </filters>
++        </target>
++    </logging>
++
++</services-config>

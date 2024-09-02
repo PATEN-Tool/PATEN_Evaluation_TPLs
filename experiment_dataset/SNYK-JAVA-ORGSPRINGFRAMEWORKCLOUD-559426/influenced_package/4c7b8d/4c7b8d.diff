@@ -1,0 +1,366 @@
+diff --git a/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/support/AbstractScmAccessor.java b/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/support/AbstractScmAccessor.java
+index 160094b5e..f92e506de 100644
+--- a/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/support/AbstractScmAccessor.java
++++ b/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/support/AbstractScmAccessor.java
+@@ -94,8 +94,8 @@ public AbstractScmAccessor(ConfigurableEnvironment environment) {
+ 	public AbstractScmAccessor(ConfigurableEnvironment environment,
+ 			AbstractScmAccessorProperties properties) {
+ 		this.environment = environment;
+-		this.basedir = properties.getBasedir() == null ? createBaseDir()
+-				: properties.getBasedir();
++		this.setBasedir(properties.getBasedir() == null ? createBaseDir()
++				: properties.getBasedir());
+ 		this.passphrase = properties.getPassphrase();
+ 		this.password = properties.getPassword();
+ 		this.searchPaths = properties.getSearchPaths();
+diff --git a/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/environment/MultipleJGitEnvironmentRepositoryTests.java b/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/environment/MultipleJGitEnvironmentRepositoryTests.java
+index 3f346b13c..1f81066ba 100644
+--- a/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/environment/MultipleJGitEnvironmentRepositoryTests.java
++++ b/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/environment/MultipleJGitEnvironmentRepositoryTests.java
+@@ -338,6 +338,18 @@ public void exceptionThrownIfBasedirDoesnotExistAndCannotBeCreated()
+ 		this.repository.afterPropertiesSet();
+ 	}
+ 
++	@Test
++	public void exceptionNotThrownIfRelativeBasedirIsPassedByProperties()
++			throws Exception {
++		MultipleJGitEnvironmentProperties props = new MultipleJGitEnvironmentProperties();
++		props.setBasedir(new File("relative"));
++		this.repository = new MultipleJGitEnvironmentRepository(this.environment, props);
++		String defaultUri = ConfigServerTestUtils.prepareLocalRepo("config-repo");
++		this.repository.setUri(defaultUri);
++		this.repository.setRepos(createRepositories());
++		this.repository.afterPropertiesSet();
++	}
++
+ 	private String getUri(String pattern) {
+ 		String uri = null;
+ 
+
+From 01be10e76caeb6a530b7d4130f4e0afe9c355003 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Alberto=20C=2E=20R=C3=ADos?= <arios@pivotal.io>
+Date: Mon, 13 Jan 2020 21:32:38 +0100
+Subject: [PATCH 2/2] Sharing default application config in CredHub (#1477)
+
+Always including application as default so that it can be shared accross all applications to be consistent with other repository implementations.
+
+Sharing secrets to the application from default profile.
+
+Updated the docs to reflect the changes
+---
+ .../main/asciidoc/spring-cloud-config.adoc    |  18 +++
+ .../CredhubEnvironmentRepository.java         |  42 ++++++-
+ ...CompositeConfigServerIntegrationTests.java |   2 +-
+ .../CredhubConfigServerIntegrationTests.java  |   2 +-
+ .../CredhubEnvironmentRepositoryTests.java    | 109 ++++++++++++++----
+ 5 files changed, 145 insertions(+), 28 deletions(-)
+
+diff --git a/docs/src/main/asciidoc/spring-cloud-config.adoc b/docs/src/main/asciidoc/spring-cloud-config.adoc
+index 4fd9b194b..da7ae49c5 100644
+--- a/docs/src/main/asciidoc/spring-cloud-config.adoc
++++ b/docs/src/main/asciidoc/spring-cloud-config.adoc
+@@ -746,6 +746,23 @@ For example, if you run the following Vault command, all applications using the
+ $ vault write secret/application foo=bar baz=bam
+ ----
+ 
++===== CredHub Server
++
++When using CredHub as a backend, you can share configuration with all applications by placing configuration in `/application/` or by placing it in the `default` profile for the application.
++For example, if you run the following CredHub command, all applications using the config server will have the properties `shared.color1` and `shared.color2` available to them:
++
++[source,sh]
++----
++credhub set --name "/application/profile/master/shared" --type=json
++value: {"shared.color1": "blue", "shared.color": "red"}
++----
++
++[source,sh]
++----
++credhub set --name "/my-app/default/master/more-shared" --type=json
++value: {"shared.word1": "hello", "shared.word2": "world"}
++----
++
+ ==== JDBC Backend
+ 
+ Spring Cloud Config Server supports JDBC (relational database) as a backend for configuration properties.
+@@ -811,6 +828,7 @@ All client applications with the name `spring.cloud.config.name=demo-app` will h
+ ----
+ 
+ NOTE: When no profile is specified `default` will be used and when no label is specified `master` will be used as a default value.
++NOTE: Values added to `application` will be shared by all the applications.
+ 
+ ===== OAuth 2.0
+ You can authenticate with link:https://oauth.net/2/[OAuth 2.0] using link:https://docs.cloudfoundry.org/concepts/architecture/uaa.html[UAA] as a provider.
+diff --git a/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/environment/CredhubEnvironmentRepository.java b/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/environment/CredhubEnvironmentRepository.java
+index 47707d275..e5746b73e 100644
+--- a/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/environment/CredhubEnvironmentRepository.java
++++ b/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/environment/CredhubEnvironmentRepository.java
+@@ -16,7 +16,7 @@
+ 
+ package org.springframework.cloud.config.server.environment;
+ 
+-import java.util.HashMap;
++import java.util.Arrays;
+ import java.util.Map;
+ 
+ import org.springframework.cloud.config.environment.Environment;
+@@ -36,6 +36,12 @@ public class CredhubEnvironmentRepository implements EnvironmentRepository {
+ 
+ 	private CredHubOperations credHubOperations;
+ 
++	private static final String DEFAULT_PROFILE = "default";
++
++	private static final String DEFAULT_LABEL = "master";
++
++	private static final String DEFAULT_APPLICATION = "application";
++
+ 	public CredhubEnvironmentRepository(CredHubOperations credHubOperations) {
+ 		this.credHubOperations = credHubOperations;
+ 	}
+@@ -43,25 +49,49 @@ public CredhubEnvironmentRepository(CredHubOperations credHubOperations) {
+ 	@Override
+ 	public Environment findOne(String application, String profilesList, String label) {
+ 		if (StringUtils.isEmpty(profilesList)) {
+-			profilesList = "default";
++			profilesList = DEFAULT_PROFILE;
+ 		}
+ 		if (StringUtils.isEmpty(label)) {
+-			label = "master";
++			label = DEFAULT_LABEL;
+ 		}
+ 
+ 		String[] profiles = StringUtils.commaDelimitedListToStringArray(profilesList);
+ 
+ 		Environment environment = new Environment(application, profiles, label, null,
+ 				null);
+-		Map<Object, Object> properties = new HashMap<>();
+ 		for (String profile : profiles) {
+-			properties.putAll(findProperties(application, profile, label));
++			environment.add(new PropertySource(
++					"credhub-" + application + "-" + profile + "-" + label,
++					findProperties(application, profile, label)));
++			if (!DEFAULT_APPLICATION.equals(application)) {
++				addDefaultPropertySource(environment, DEFAULT_APPLICATION, profile,
++						label);
++			}
++		}
++
++		if (!Arrays.asList(profiles).contains(DEFAULT_PROFILE)) {
++			addDefaultPropertySource(environment, application, DEFAULT_PROFILE, label);
++		}
++
++		if (!Arrays.asList(profiles).contains(DEFAULT_PROFILE)
++				&& !DEFAULT_APPLICATION.equals(application)) {
++			addDefaultPropertySource(environment, DEFAULT_APPLICATION, DEFAULT_PROFILE,
++					label);
+ 		}
+-		environment.add(new PropertySource("credhub-" + application, properties));
+ 
+ 		return environment;
+ 	}
+ 
++	private void addDefaultPropertySource(Environment environment, String application,
++			String profile, String label) {
++		Map<Object, Object> properties = findProperties(application, profile, label);
++		if (!properties.isEmpty()) {
++			PropertySource propertySource = new PropertySource(
++					"credhub-" + application + "-" + profile + "-" + label, properties);
++			environment.add(propertySource);
++		}
++	}
++
+ 	private Map<Object, Object> findProperties(String application, String profile,
+ 			String label) {
+ 		String path = "/" + application + "/" + profile + "/" + label;
+diff --git a/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/CredhubCompositeConfigServerIntegrationTests.java b/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/CredhubCompositeConfigServerIntegrationTests.java
+index 4201b43db..82c497e52 100644
+--- a/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/CredhubCompositeConfigServerIntegrationTests.java
++++ b/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/CredhubCompositeConfigServerIntegrationTests.java
+@@ -49,7 +49,7 @@ public void shouldRetrieveValuesFromCredhub() {
+ 
+ 		assertThat(environment.getPropertySources().isEmpty()).isFalse();
+ 		assertThat(environment.getPropertySources().get(0).getName())
+-				.isEqualTo("credhub-myapp");
++				.isEqualTo("credhub-myapp-master-default");
+ 		assertThat(environment.getPropertySources().get(0).getSource().toString())
+ 				.isEqualTo("{key=value}");
+ 	}
+diff --git a/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/CredhubConfigServerIntegrationTests.java b/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/CredhubConfigServerIntegrationTests.java
+index c77f501d8..65d018308 100644
+--- a/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/CredhubConfigServerIntegrationTests.java
++++ b/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/CredhubConfigServerIntegrationTests.java
+@@ -48,7 +48,7 @@ public void shouldRetrieveValuesFromCredhub() {
+ 
+ 		assertThat(environment.getPropertySources().isEmpty()).isFalse();
+ 		assertThat(environment.getPropertySources().get(0).getName())
+-				.isEqualTo("credhub-myapp");
++				.isEqualTo("credhub-myapp-master-default");
+ 		assertThat(environment.getPropertySources().get(0).getSource().toString())
+ 				.isEqualTo("{key=value}");
+ 	}
+diff --git a/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/environment/CredhubEnvironmentRepositoryTests.java b/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/environment/CredhubEnvironmentRepositoryTests.java
+index b7322322b..ad655c453 100644
+--- a/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/environment/CredhubEnvironmentRepositoryTests.java
++++ b/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/environment/CredhubEnvironmentRepositoryTests.java
+@@ -68,11 +68,13 @@ public void shouldDisplayEmptyPropertiesWhenNoPathFound() {
+ 		Environment environment = this.credhubEnvironmentRepository
+ 				.findOne("my-application", "production", "mylabel");
+ 
+-		assertThat(environment.getLabel()).isEqualTo("mylabel");
+-		assertThat(environment.getProfiles()).containsExactly("production");
+ 		assertThat(environment.getName()).isEqualTo("my-application");
++		assertThat(environment.getProfiles()).containsExactly("production");
++		assertThat(environment.getLabel()).isEqualTo("mylabel");
++
++		assertThat(environment.getPropertySources().size()).isEqualTo(1);
+ 		assertThat(environment.getPropertySources().get(0).getName())
+-				.isEqualTo("credhub-my-application");
++				.isEqualTo("credhub-my-application-production-mylabel");
+ 		assertThat(environment.getPropertySources().get(0).getSource()).isEmpty();
+ 	}
+ 
+@@ -83,11 +85,13 @@ public void shouldRetrieveDefaultsWhenNoLabelNorProfileProvided() {
+ 		Environment environment = this.credhubEnvironmentRepository
+ 				.findOne("my-application", null, null);
+ 
+-		assertThat(environment.getLabel()).isEqualTo("master");
+-		assertThat(environment.getProfiles()).containsExactly("default");
+ 		assertThat(environment.getName()).isEqualTo("my-application");
++		assertThat(environment.getProfiles()).containsExactly("default");
++		assertThat(environment.getLabel()).isEqualTo("master");
++
++		assertThat(environment.getPropertySources().size()).isEqualTo(1);
+ 		assertThat(environment.getPropertySources().get(0).getName())
+-				.isEqualTo("credhub-my-application");
++				.isEqualTo("credhub-my-application-default-master");
+ 		assertThat(environment.getPropertySources().get(0).getSource())
+ 				.isEqualTo(singletonMap("key1", "value1"));
+ 	}
+@@ -100,11 +104,13 @@ public void shouldRetrieveGivenProfileAndLabel() {
+ 		Environment environment = this.credhubEnvironmentRepository
+ 				.findOne("my-application", "production", "mylabel");
+ 
+-		assertThat(environment.getLabel()).isEqualTo("mylabel");
+-		assertThat(environment.getProfiles()).containsExactly("production");
+ 		assertThat(environment.getName()).isEqualTo("my-application");
++		assertThat(environment.getProfiles()).containsExactly("production");
++		assertThat(environment.getLabel()).isEqualTo("mylabel");
++
++		assertThat(environment.getPropertySources().size()).isEqualTo(1);
+ 		assertThat(environment.getPropertySources().get(0).getName())
+-				.isEqualTo("credhub-my-application");
++				.isEqualTo("credhub-my-application-production-mylabel");
+ 		assertThat(environment.getPropertySources().get(0).getSource())
+ 				.isEqualTo(singletonMap("key1", "value1"));
+ 	}
+@@ -118,16 +124,20 @@ public void shouldRetrieveGivenMultipleProfiles() {
+ 		Environment environment = this.credhubEnvironmentRepository
+ 				.findOne("my-application", "production,cloud", "mylabel");
+ 
+-		assertThat(environment.getLabel()).isEqualTo("mylabel");
+-		assertThat(environment.getProfiles()).containsExactly("production", "cloud");
+ 		assertThat(environment.getName()).isEqualTo("my-application");
++		assertThat(environment.getProfiles()).containsExactly("production", "cloud");
++		assertThat(environment.getLabel()).isEqualTo("mylabel");
++
++		assertThat(environment.getPropertySources().size()).isEqualTo(2);
+ 		assertThat(environment.getPropertySources().get(0).getName())
+-				.isEqualTo("credhub-my-application");
+-		HashMap<Object, Object> expectedValues = new HashMap<>();
+-		expectedValues.put("key1", "value1");
+-		expectedValues.put("key2", "value2");
++				.isEqualTo("credhub-my-application-production-mylabel");
+ 		assertThat(environment.getPropertySources().get(0).getSource())
+-				.isEqualTo(expectedValues);
++				.isEqualTo(singletonMap("key1", "value1"));
++		assertThat(environment.getPropertySources().get(1).getName())
++
++				.isEqualTo("credhub-my-application-cloud-mylabel");
++		assertThat(environment.getPropertySources().get(1).getSource())
++				.isEqualTo(singletonMap("key2", "value2"));
+ 	}
+ 
+ 	@Test
+@@ -158,12 +168,13 @@ public void shouldMergeWhenMoreThanOneCredentialsFound() {
+ 		Environment environment = this.credhubEnvironmentRepository
+ 				.findOne("my-application", "production", "mylabel");
+ 
+-		assertThat(environment.getLabel()).isEqualTo("mylabel");
+-		assertThat(environment.getProfiles()).containsExactly("production");
+ 		assertThat(environment.getName()).isEqualTo("my-application");
+-		assertThat(environment.getPropertySources().get(0).getName())
+-				.isEqualTo("credhub-my-application");
++		assertThat(environment.getProfiles()).containsExactly("production");
++		assertThat(environment.getLabel()).isEqualTo("mylabel");
+ 
++		assertThat(environment.getPropertySources().size()).isEqualTo(1);
++		assertThat(environment.getPropertySources().get(0).getName())
++				.isEqualTo("credhub-my-application-production-mylabel");
+ 		HashMap<Object, Object> expectedValues = new HashMap<>();
+ 		expectedValues.put("key1", "value1");
+ 		expectedValues.put("key2", "value2");
+@@ -171,6 +182,64 @@ public void shouldMergeWhenMoreThanOneCredentialsFound() {
+ 				.isEqualTo(expectedValues);
+ 	}
+ 
++	@Test
++	public void shouldIncludeDefaultApplicationWhenOtherProvided() {
++		stubCredentials("/my-application/production/mylabel", "toggles", "key1",
++				"value1");
++		stubCredentials("/application/production/mylabel", "abs", "key2", "value2");
++
++		Environment environment = this.credhubEnvironmentRepository
++				.findOne("my-application", "production", "mylabel");
++
++		assertThat(environment.getName()).isEqualTo("my-application");
++		assertThat(environment.getProfiles()).containsExactly("production");
++		assertThat(environment.getLabel()).isEqualTo("mylabel");
++
++		assertThat(environment.getPropertySources().size()).isEqualTo(2);
++		assertThat(environment.getPropertySources().get(0).getName())
++				.isEqualTo("credhub-my-application-production-mylabel");
++		assertThat(environment.getPropertySources().get(0).getSource())
++				.isEqualTo(singletonMap("key1", "value1"));
++		assertThat(environment.getPropertySources().get(1).getName())
++				.isEqualTo("credhub-application-production-mylabel");
++		assertThat(environment.getPropertySources().get(1).getSource())
++				.isEqualTo(singletonMap("key2", "value2"));
++	}
++
++	@Test
++	public void shouldIncludeDefaultProfileWhenOtherProvided() {
++		stubCredentials("/my-application/production/mylabel", "toggles", "key1",
++				"value1");
++		stubCredentials("/application/production/mylabel", "abs", "key2", "value2");
++		stubCredentials("/my-application/default/mylabel", "abs", "key3", "value3");
++		stubCredentials("/application/default/mylabel", "abs", "key4", "value4");
++
++		Environment environment = this.credhubEnvironmentRepository
++				.findOne("my-application", "production", "mylabel");
++
++		assertThat(environment.getName()).isEqualTo("my-application");
++		assertThat(environment.getProfiles()).contains("production");
++		assertThat(environment.getLabel()).isEqualTo("mylabel");
++
++		assertThat(environment.getPropertySources().size()).isEqualTo(4);
++		assertThat(environment.getPropertySources().get(0).getName())
++				.isEqualTo("credhub-my-application-production-mylabel");
++		assertThat(environment.getPropertySources().get(0).getSource())
++				.isEqualTo(singletonMap("key1", "value1"));
++		assertThat(environment.getPropertySources().get(1).getName())
++				.isEqualTo("credhub-application-production-mylabel");
++		assertThat(environment.getPropertySources().get(1).getSource())
++				.isEqualTo(singletonMap("key2", "value2"));
++		assertThat(environment.getPropertySources().get(2).getName())
++				.isEqualTo("credhub-my-application-default-mylabel");
++		assertThat(environment.getPropertySources().get(2).getSource())
++				.isEqualTo(singletonMap("key3", "value3"));
++		assertThat(environment.getPropertySources().get(3).getName())
++				.isEqualTo("credhub-application-default-mylabel");
++		assertThat(environment.getPropertySources().get(3).getSource())
++				.isEqualTo(singletonMap("key4", "value4"));
++	}
++
+ 	private void stubCredentials(String expectedPath, String name, String key,
+ 			String value) {
+ 		SimpleCredentialName credentialsName = new SimpleCredentialName(

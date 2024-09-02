@@ -1,0 +1,999 @@
+diff --git a/services/src/main/java/org/keycloak/authentication/authenticators/x509/AbstractX509ClientCertificateAuthenticator.java b/services/src/main/java/org/keycloak/authentication/authenticators/x509/AbstractX509ClientCertificateAuthenticator.java
+index e58c2a4292ed..930cea310a04 100644
+--- a/services/src/main/java/org/keycloak/authentication/authenticators/x509/AbstractX509ClientCertificateAuthenticator.java
++++ b/services/src/main/java/org/keycloak/authentication/authenticators/x509/AbstractX509ClientCertificateAuthenticator.java
+@@ -59,6 +59,7 @@ public abstract class AbstractX509ClientCertificateAuthenticator implements Auth
+     public static final String MAPPING_SOURCE_CERT_SUBJECTDN = "Match SubjectDN using regular expression";
+     public static final String MAPPING_SOURCE_CERT_SUBJECTDN_EMAIL = "Subject's e-mail";
+     public static final String MAPPING_SOURCE_CERT_SUBJECTALTNAME_EMAIL = "Subject's Alternative Name E-mail";
++    public static final String MAPPING_SOURCE_CERT_SUBJECTALTNAME_OTHERNAME = "Subject's Alternative Name otherName (UPN)";
+     public static final String MAPPING_SOURCE_CERT_SUBJECTDN_CN = "Subject's Common Name";
+     public static final String MAPPING_SOURCE_CERT_ISSUERDN = "Match IssuerDN using regular expression";
+     public static final String MAPPING_SOURCE_CERT_ISSUERDN_EMAIL = "Issuer's e-mail";
+@@ -152,6 +153,9 @@ static UserIdentityExtractor fromConfig(X509AuthenticatorConfigModel config) {
+                 case SUBJECTALTNAME_EMAIL:
+                     extractor = UserIdentityExtractor.getSubjectAltNameExtractor(1);
+                     break;
++                case SUBJECTALTNAME_OTHERNAME:
++                    extractor = UserIdentityExtractor.getSubjectAltNameExtractor(0);
++                    break;
+                 case ISSUERDN_CN:
+                     extractor = UserIdentityExtractor.getX500NameExtractor(BCStyle.CN, issuer);
+                     break;
+diff --git a/services/src/main/java/org/keycloak/authentication/authenticators/x509/AbstractX509ClientCertificateAuthenticatorFactory.java b/services/src/main/java/org/keycloak/authentication/authenticators/x509/AbstractX509ClientCertificateAuthenticatorFactory.java
+index 03e8a3343456..ea77149e81ef 100644
+--- a/services/src/main/java/org/keycloak/authentication/authenticators/x509/AbstractX509ClientCertificateAuthenticatorFactory.java
++++ b/services/src/main/java/org/keycloak/authentication/authenticators/x509/AbstractX509ClientCertificateAuthenticatorFactory.java
+@@ -44,6 +44,7 @@
+ import static org.keycloak.authentication.authenticators.x509.AbstractX509ClientCertificateAuthenticator.MAPPING_SOURCE_CERT_ISSUERDN_EMAIL;
+ import static org.keycloak.authentication.authenticators.x509.AbstractX509ClientCertificateAuthenticator.MAPPING_SOURCE_CERT_SERIALNUMBER;
+ import static org.keycloak.authentication.authenticators.x509.AbstractX509ClientCertificateAuthenticator.MAPPING_SOURCE_CERT_SUBJECTALTNAME_EMAIL;
++import static org.keycloak.authentication.authenticators.x509.AbstractX509ClientCertificateAuthenticator.MAPPING_SOURCE_CERT_SUBJECTALTNAME_OTHERNAME;
+ import static org.keycloak.authentication.authenticators.x509.AbstractX509ClientCertificateAuthenticator.MAPPING_SOURCE_CERT_SUBJECTDN;
+ import static org.keycloak.authentication.authenticators.x509.AbstractX509ClientCertificateAuthenticator.MAPPING_SOURCE_CERT_SUBJECTDN_CN;
+ import static org.keycloak.authentication.authenticators.x509.AbstractX509ClientCertificateAuthenticator.MAPPING_SOURCE_CERT_SUBJECTDN_EMAIL;
+@@ -72,6 +73,7 @@ public abstract class AbstractX509ClientCertificateAuthenticatorFactory implemen
+             MAPPING_SOURCE_CERT_SUBJECTDN,
+             MAPPING_SOURCE_CERT_SUBJECTDN_EMAIL,
+             MAPPING_SOURCE_CERT_SUBJECTALTNAME_EMAIL,
++            MAPPING_SOURCE_CERT_SUBJECTALTNAME_OTHERNAME,
+             MAPPING_SOURCE_CERT_SUBJECTDN_CN,
+             MAPPING_SOURCE_CERT_ISSUERDN,
+             MAPPING_SOURCE_CERT_ISSUERDN_EMAIL,
+diff --git a/services/src/main/java/org/keycloak/authentication/authenticators/x509/UserIdentityExtractor.java b/services/src/main/java/org/keycloak/authentication/authenticators/x509/UserIdentityExtractor.java
+index 881fdb7671e8..e44453b248fd 100644
+--- a/services/src/main/java/org/keycloak/authentication/authenticators/x509/UserIdentityExtractor.java
++++ b/services/src/main/java/org/keycloak/authentication/authenticators/x509/UserIdentityExtractor.java
+@@ -19,12 +19,18 @@
+ package org.keycloak.authentication.authenticators.x509;
+ 
+ import freemarker.template.utility.NullArgumentException;
++import org.bouncycastle.asn1.ASN1Encodable;
++import org.bouncycastle.asn1.ASN1InputStream;
+ import org.bouncycastle.asn1.ASN1ObjectIdentifier;
++import org.bouncycastle.asn1.ASN1Sequence;
++import org.bouncycastle.asn1.ASN1TaggedObject;
++import org.bouncycastle.asn1.DERUTF8String;
+ import org.bouncycastle.asn1.x500.RDN;
+ import org.bouncycastle.asn1.x500.X500Name;
+ import org.bouncycastle.asn1.x500.style.IETFUtils;
+ import org.keycloak.services.ServicesLogger;
+ 
++import java.io.ByteArrayInputStream;
+ import java.security.cert.CertificateParsingException;
+ import java.security.cert.X509Certificate;
+ import java.util.Collection;
+@@ -101,6 +107,9 @@ public Object extractUserIdentity(X509Certificate[] certs) {
+      */
+     static class SubjectAltNameExtractor extends UserIdentityExtractor {
+ 
++        // User Principal Name. Used typically by Microsoft in certificates for Smart Card Login
++        private static final String UPN_OID = "1.3.6.1.4.1.311.20.2.3";
++
+         private final int generalName;
+ 
+         /**
+@@ -127,19 +136,79 @@ public Object extractUserIdentity(X509Certificate[] certs) {
+ 
+                 Iterator<List<?>> iterator = subjectAlternativeNames.iterator();
+ 
+-                while (iterator.hasNext()) {
++                boolean foundUpn = false;
++                String tempOtherName = null;
++                String tempOid = null;
++
++                while (iterator.hasNext() && !foundUpn) {
+                     List<?> next = iterator.next();
+ 
+                     if (Integer.class.cast(next.get(0)) == generalName) {
+-                        return next.get(1);
++
++                        // We will try to find UPN_OID among the subjectAltNames of type 'otherName' . Just if not found, we will fallback to the other type
++                        for (int i = 1 ; i<next.size() ; i++) {
++                            Object obj = next.get(i);
++
++                            // We have Subject Alternative Name of other type than 'otherName' . Just return it directly
++                            if (generalName != 0) {
++                                logger.tracef("Extracted identity '%s' from Subject Alternative Name of type '%d'", obj, generalName);
++                                return obj;
++                            }
++
++                            byte[] otherNameBytes = (byte[]) obj;
++
++                            try {
++                                ASN1InputStream asn1Stream = new ASN1InputStream(new ByteArrayInputStream(otherNameBytes));
++                                ASN1Encodable asn1otherName = asn1Stream.readObject();
++                                asn1otherName = unwrap(asn1otherName);
++
++                                ASN1Sequence asn1Sequence = ASN1Sequence.getInstance(asn1otherName);
++
++                                if (asn1Sequence != null) {
++                                    ASN1Encodable encodedOid = asn1Sequence.getObjectAt(0);
++                                    ASN1ObjectIdentifier oid = ASN1ObjectIdentifier.getInstance(unwrap(encodedOid));
++                                    tempOid = oid.getId();
++
++                                    ASN1Encodable principalNameEncoded = asn1Sequence.getObjectAt(1);
++                                    DERUTF8String principalName = DERUTF8String.getInstance(unwrap(principalNameEncoded));
++
++                                    tempOtherName = principalName.getString();
++
++                                    // We found UPN among the 'otherName' principal. We don't need to look other
++                                    if (UPN_OID.equals(tempOid)) {
++                                        foundUpn = true;
++                                        break;
++                                    }
++                                }
++
++                            } catch (Exception e) {
++                                logger.error("Failed to parse subjectAltName", e);
++                            }
++                        }
++
+                     }
+                 }
++
++                logger.tracef("Parsed otherName from subjectAltName. OID: '%s', Principal: '%s'", tempOid, tempOtherName);
++
++                return tempOtherName;
++
+             } catch (CertificateParsingException cause) {
+                 logger.errorf(cause, "Failed to obtain identity from subjectAltName extension");
+             }
+ 
+             return null;
+         }
++
++
++        private ASN1Encodable unwrap(ASN1Encodable encodable) {
++            while (encodable instanceof ASN1TaggedObject) {
++                ASN1TaggedObject taggedObj = (ASN1TaggedObject) encodable;
++                encodable = taggedObj.getObject();
++            }
++
++            return encodable;
++        }
+     }
+ 
+     static class PatternMatcher extends UserIdentityExtractor {
+diff --git a/services/src/main/java/org/keycloak/authentication/authenticators/x509/X509AuthenticatorConfigModel.java b/services/src/main/java/org/keycloak/authentication/authenticators/x509/X509AuthenticatorConfigModel.java
+index f5373744cf4a..ae50667663dd 100644
+--- a/services/src/main/java/org/keycloak/authentication/authenticators/x509/X509AuthenticatorConfigModel.java
++++ b/services/src/main/java/org/keycloak/authentication/authenticators/x509/X509AuthenticatorConfigModel.java
+@@ -61,6 +61,7 @@ public enum MappingSourceType {
+         SUBJECTDN_CN(MAPPING_SOURCE_CERT_SUBJECTDN_CN),
+         SUBJECTDN_EMAIL(MAPPING_SOURCE_CERT_SUBJECTDN_EMAIL),
+         SUBJECTALTNAME_EMAIL(MAPPING_SOURCE_CERT_SUBJECTALTNAME_EMAIL),
++        SUBJECTALTNAME_OTHERNAME(MAPPING_SOURCE_CERT_SUBJECTALTNAME_OTHERNAME),
+         SUBJECTDN(MAPPING_SOURCE_CERT_SUBJECTDN);
+ 
+         private String name;
+diff --git a/services/src/test/java/org/keycloak/authentication/authenticators/x509/SubjectAltNameIdentityExtractorTest.java b/services/src/test/java/org/keycloak/authentication/authenticators/x509/SubjectAltNameIdentityExtractorTest.java
+new file mode 100644
+index 000000000000..c03a54d56a82
+--- /dev/null
++++ b/services/src/test/java/org/keycloak/authentication/authenticators/x509/SubjectAltNameIdentityExtractorTest.java
+@@ -0,0 +1,64 @@
++/*
++ * Copyright 2017 Red Hat, Inc. and/or its affiliates
++ * and other contributors as indicated by the @author tags.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.keycloak.authentication.authenticators.x509;
++
++import java.io.InputStream;
++import java.nio.charset.Charset;
++import java.security.cert.X509Certificate;
++import org.junit.Assert;
++import org.junit.Test;
++import org.keycloak.common.util.PemUtils;
++import org.keycloak.common.util.StreamUtil;
++
++/**
++ * @author <a href="mailto:mposolda@redhat.com">Marek Posolda</a>
++ */
++public class SubjectAltNameIdentityExtractorTest {
++
++    @Test
++    public void testX509SubjectAltName_otherName() throws Exception {
++        UserIdentityExtractor extractor = UserIdentityExtractor.getSubjectAltNameExtractor(0);
++
++        X509Certificate cert = getCertificate();
++
++        Object upn = extractor.extractUserIdentity(new X509Certificate[] { cert});
++        Assert.assertEquals("test-user@some-company-domain", upn);
++    }
++
++
++    @Test
++    public void testX509SubjectAltName_email() throws Exception {
++        UserIdentityExtractor extractor = UserIdentityExtractor.getSubjectAltNameExtractor(1);
++
++        X509Certificate cert = getCertificate();
++
++        Object upn = extractor.extractUserIdentity(new X509Certificate[] { cert});
++        Assert.assertEquals("test@somecompany.com", upn);
++    }
++
++
++    private X509Certificate getCertificate() throws Exception {
++        InputStream is = getClass().getResourceAsStream("/certs/UPN-cert.pem");
++
++        String s = StreamUtil.readString(is, Charset.defaultCharset());
++
++        return PemUtils.decodeCertificate(s);
++    }
++
++
++}
+diff --git a/services/src/test/resources/certs/UPN-cert.pem b/services/src/test/resources/certs/UPN-cert.pem
+new file mode 100644
+index 000000000000..23f927942971
+--- /dev/null
++++ b/services/src/test/resources/certs/UPN-cert.pem
+@@ -0,0 +1,29 @@
++-----BEGIN CERTIFICATE-----
++MIIE6DCCA9CgAwIBAgIBADANBgkqhkiG9w0BAQsFADCBpzELMAkGA1UEBhMCVVMx
++HTAbBgNVBAgMFERpc3RyaWN0IG9mIENvbHVtYmlhMRMwEQYDVQQHDApXYXNoaW5n
++dG9uMRUwEwYDVQQKDAxTb21lIENvbXBhbnkxGDAWBgNVBAsMD1NvbWUgRGVwYXJ0
++bWVudDEQMA4GA1UEAwwHVGVzdCBDQTEhMB8GCSqGSIb3DQEJARYSY2FAc29tZWNv
++bXBhbnkuY29tMB4XDTE0MDYxMjE3MDkxMloXDTI0MDYxMjE3MDkxMlowgZYxCzAJ
++BgNVBAYTAlVTMR0wGwYDVQQIDBREaXN0cmljdCBvZiBDb2x1bWJpYTEVMBMGA1UE
++CgwMU29tZSBDb21wYW55MRgwFgYDVQQLDA9Tb21lIERlcGFydG1lbnQxEjAQBgNV
++BAMMCVRlc3QgVXNlcjEjMCEGCSqGSIb3DQEJARYUdGVzdEBzb21lY29tcGFueS5j
++b20wggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQD42s0Q8YXv/rQrk4rF
++4aHmuz8Tq9jWk3bU/tJoBgZTG2xCYfolT2z4j2Qa6kjXucEJuqOKihxMMZ1We0G4
++I6tm5QJxqkEoUYmUZHu/QZSrH1gwgS0yjvfq+Kk+yvKqplXDUyxbLRuMBRgFRCy0
++TUvdJPE4IQZQCcHir0Vqs667vj0UjSpI+y0BDZPY5CRePRSKcjM4ixoR9B8xj5kg
++RcMxg4EszC2oK7z0IuuYKi0ZOdot1wVKP4OD/9evE2wjUYVeYCAV9y7tMlVsN0N5
++dRplCSIa/CA5gTMod3C92t83VoPqfb0f71cNQAsx1V3dNtOKnTOoG5jX70RR4Rqk
++8ItNAgMBAAGjggEsMIIBKDAJBgNVHRMEAjAAMBEGCWCGSAGG+EIBAQQEAwIFoDAL
++BgNVHQ8EBAMCBeAwKwYJYIZIAYb4QgENBB4WHFNtYXJ0IENhcmQgTG9naW4gQ2Vy
++dGlmaWNhdGUwHQYDVR0OBBYEFN1P5EBNqZ+MGrJQziiVMhkKAXr9MB8GA1UdIwQY
++MBaAFCHrFg422S+AWOHXfPIdqxbRhXegME4GA1UdEQRHMEWBFHRlc3RAc29tZWNv
++bXBhbnkuY29toC0GCisGAQQBgjcUAgOgHwwddGVzdC11c2VyQHNvbWUtY29tcGFu
++eS1kb21haW4wHQYDVR0SBBYwFIESY2FAc29tZWNvbXBhbnkuY29tMB8GA1UdJQQY
++MBYGCCsGAQUFBwMCBgorBgEEAYI3FAICMA0GCSqGSIb3DQEBCwUAA4IBAQCPI5Zk
++DqGHkKfFhRjlzLLajUEveggs74x3roi6S0zlpXpbPA3iZ2N8COf/QZL3twKunbP9
++XpmW/pcSji3+pil9aHPRn69S4cSuKdN5ZP9oQhkZxdk2UFS8Ts0WA+SUDJ3qTEtA
++Q0HswBFBzWGOi0zkCtvAaBa8WSnDPtUN5RzmUtkKoMxBzu/MEMWNYXZyk/G2NHMJ
++jh0N+ICpRNpnXGIZBwFymIRGH/PjtVkArVXy0hILWP/qfYzYMFgUBl0InyQzT0Hw
++gzGdoeK7fVYrPWLK3ryRqqSR1XvfKFHwlnIg4XTBN4Cj7m5TmpntgVhO2JpNDjLr
++K/NmtORHe6OhF17I
++-----END CERTIFICATE-----
+\ No newline at end of file
+diff --git a/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/certs/clients/test-user-san-email@localhost.cert.pem b/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/certs/clients/test-user-san-email@localhost.cert.pem
+deleted file mode 100644
+index 4a00a127c4ca..000000000000
+--- a/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/certs/clients/test-user-san-email@localhost.cert.pem
++++ /dev/null
+@@ -1,38 +0,0 @@
+------BEGIN CERTIFICATE-----
+-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
+------END CERTIFICATE-----
+diff --git a/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/certs/clients/test-user-san@localhost.cert.pem b/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/certs/clients/test-user-san@localhost.cert.pem
+new file mode 100644
+index 000000000000..cf12f0c9cdc2
+--- /dev/null
++++ b/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/certs/clients/test-user-san@localhost.cert.pem
+@@ -0,0 +1,41 @@
++-----BEGIN CERTIFICATE-----
++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
++-----END CERTIFICATE-----
+diff --git a/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/certs/clients/test-user-san@localhost.p12 b/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/certs/clients/test-user-san@localhost.p12
+new file mode 100644
+index 0000000000000000000000000000000000000000..4aa422bc2e1a5f4a8c2d7117c597c5213b17dea3
+GIT binary patch
+literal 10925
+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
+BAb|h?
+
+literal 0
+HcmV?d00001
+
+diff --git a/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/intermediate/openssl-san.cnf b/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/intermediate/openssl-san.cnf
+index 4bf6ffc46e2e..2b7c9acd9b26 100644
+--- a/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/intermediate/openssl-san.cnf
++++ b/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/intermediate/openssl-san.cnf
+@@ -84,7 +84,8 @@ stateOrProvinceName_default     = MA
+ localityName_default            = Boston
+ 0.organizationName_default      = Red Hat
+ organizationalUnitName_default  = Keycloak
+-emailAddress_default            = contact@keycloak.org
++commonName_default              = test-user
++emailAddress_default            = test-user@localhost
+ 
+ [ v3_ca ]
+ # Extensions for a typical CA (`man x509v3_config`).
+@@ -106,13 +107,21 @@ basicConstraints = CA:FALSE
+ nsCertType = client, email
+ nsComment = "OpenSSL Generated Client Certificate"
+ subjectKeyIdentifier = hash
+-authorityKeyIdentifier = keyid,issuer
++#authorityKeyIdentifier = keyid,issuer
+ keyUsage = critical, nonRepudiation, digitalSignature, keyEncipherment
+ extendedKeyUsage = clientAuth, emailProtection
+ crlDistributionPoints = URI:http://localhost:8888/crl                                                    
+ authorityInfoAccess = OCSP;URI:http://localhost:8888/oscp
+-subjectAltName=email:copy
+-subjectAltName=email:move
++subjectAltName=@user_subject_alt_names
++
++[ user_subject_alt_names ]
++email = test-user-altmail@localhost
++IP = 192.168.7.1
++DNS = www.example-test.com
++URI = http://www.example-test.com
++otherName.1 = 1.2.3.4;UTF8:my_test_user
++otherName.2 = 1.3.6.1.4.1.311.20.2.3;UTF8:test_upn_name@localhost
++
+ 
+ [ server_cert ]
+ # Extensions for server certificates (`man x509v3_config`).
+diff --git a/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/intermediate/serial b/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/intermediate/serial
+index dd11724042e2..fb35a14c0271 100644
+--- a/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/intermediate/serial
++++ b/testsuite/integration-arquillian/servers/auth-server/jboss/common/pki/root/ca/intermediate/serial
+@@ -1 +1 @@
+-1001
++1007
+diff --git a/testsuite/integration-arquillian/servers/auth-server/jboss/pom.xml b/testsuite/integration-arquillian/servers/auth-server/jboss/pom.xml
+index a8317fb34a3e..4270d8e9ff3a 100644
+--- a/testsuite/integration-arquillian/servers/auth-server/jboss/pom.xml
++++ b/testsuite/integration-arquillian/servers/auth-server/jboss/pom.xml
+@@ -195,7 +195,7 @@
+                                         <resource>
+                                             <directory>${common.resources}/pki/root/ca</directory>
+                                             <includes>
+-                                                <include>certs/clients/test-user-san-email@localhost.cert.pem</include>
++                                                <include>certs/clients/test-user-san@localhost.cert.pem</include>
+                                                 <include>certs/clients/test-user@localhost.key.pem</include>
+                                             </includes>
+                                         </resource>
+diff --git a/testsuite/integration-arquillian/servers/auth-server/undertow/pom.xml b/testsuite/integration-arquillian/servers/auth-server/undertow/pom.xml
+index a62dd1f6404b..ad2b506391b5 100644
+--- a/testsuite/integration-arquillian/servers/auth-server/undertow/pom.xml
++++ b/testsuite/integration-arquillian/servers/auth-server/undertow/pom.xml
+@@ -88,6 +88,12 @@
+             <resource>
+                 <directory>${common.resources}/keystore</directory>
+             </resource>
++            <resource>
++                <directory>${common.resources}/pki/root/ca</directory>
++                <includes>
++                    <include>certs/clients/*</include>
++                </includes>
++            </resource>
+         </resources>
+     </build>
+ 
+diff --git a/testsuite/integration-arquillian/tests/base/pom.xml b/testsuite/integration-arquillian/tests/base/pom.xml
+index 32d34529c689..e73fcee25888 100644
+--- a/testsuite/integration-arquillian/tests/base/pom.xml
++++ b/testsuite/integration-arquillian/tests/base/pom.xml
+@@ -273,7 +273,7 @@
+                                     <outputDirectory>${containers.home}/auth-server-undertow</outputDirectory>
+                                 </artifactItem>
+                             </artifactItems>
+-                            <includes>*.jks,*.crt,*.truststore</includes>
++                            <includes>*.jks,*.crt,*.truststore,*.crl,*.key,certs/clients/*</includes>
+                         </configuration>
+                     </execution>
+                 </executions>
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/x509/AbstractX509AuthenticationTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/x509/AbstractX509AuthenticationTest.java
+index e5190ee005b8..ebc2c5997cb4 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/x509/AbstractX509AuthenticationTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/x509/AbstractX509AuthenticationTest.java
+@@ -49,7 +49,6 @@
+ import org.keycloak.testsuite.util.AssertAdminEvents;
+ import org.keycloak.testsuite.util.ClientBuilder;
+ import org.keycloak.testsuite.util.DroneUtils;
+-import org.keycloak.testsuite.util.PhantomJSBrowser;
+ import org.keycloak.testsuite.util.RealmBuilder;
+ import org.keycloak.testsuite.util.UserBuilder;
+ import org.openqa.selenium.WebDriver;
+@@ -68,6 +67,7 @@
+ import static org.keycloak.authentication.authenticators.x509.X509AuthenticatorConfigModel.MappingSourceType.ISSUERDN;
+ import static org.keycloak.authentication.authenticators.x509.X509AuthenticatorConfigModel.MappingSourceType.ISSUERDN_CN;
+ import static org.keycloak.authentication.authenticators.x509.X509AuthenticatorConfigModel.MappingSourceType.SUBJECTALTNAME_EMAIL;
++import static org.keycloak.authentication.authenticators.x509.X509AuthenticatorConfigModel.MappingSourceType.SUBJECTALTNAME_OTHERNAME;
+ import static org.keycloak.authentication.authenticators.x509.X509AuthenticatorConfigModel.MappingSourceType.SUBJECTDN_CN;
+ import static org.keycloak.authentication.authenticators.x509.X509AuthenticatorConfigModel.MappingSourceType.SUBJECTDN_EMAIL;
+ 
+@@ -117,24 +117,39 @@ public void validateConfiguration() {
+         Assume.assumeTrue(AUTH_SERVER_SSL_REQUIRED);
+     }
+ 
++
+     @BeforeClass
+     public static void onBeforeTestClass() {
+-        if (isAuthServerJBoss()) {
+-            String authServerHome = System.getProperty("auth.server.home");
++        configurePhantomJS("/ca.crt", "/client.crt", "/client.key", "secret");
++    }
+ 
+-            if (authServerHome != null && System.getProperty("auth.server.ssl.required") != null) {
+-                authServerHome = authServerHome + "/standalone/configuration";
+-                StringBuilder cliArgs = new StringBuilder();
+ 
+-                cliArgs.append("--ignore-ssl-errors=true ");
+-                cliArgs.append("--web-security=false ");
+-                cliArgs.append("--ssl-certificates-path=").append(authServerHome).append("/ca.crt ");
+-                cliArgs.append("--ssl-client-certificate-file=").append(authServerHome).append("/client.crt ");
+-                cliArgs.append("--ssl-client-key-file=").append(authServerHome).append("/client.key ");
+-                cliArgs.append("--ssl-client-key-passphrase=secret ");
++    /**
++     * Setup phantom JS to be used for mutual TLS testing. All file paths are relative to "authServerHome"
++     *
++     * @param certificatesPath
++     * @param clientCertificateFile
++     * @param clientKeyFile
++     * @param clientKeyPassword
++     */
++    protected static void configurePhantomJS(String certificatesPath, String clientCertificateFile, String clientKeyFile, String clientKeyPassword) {
++        String authServerHome = System.getProperty("auth.server.home");
+ 
+-                System.setProperty("keycloak.phantomjs.cli.args", cliArgs.toString());
++        if (authServerHome != null && System.getProperty("auth.server.ssl.required") != null) {
++            if (isAuthServerJBoss()) {
++                authServerHome = authServerHome + "/standalone/configuration";
+             }
++
++            StringBuilder cliArgs = new StringBuilder();
++
++            cliArgs.append("--ignore-ssl-errors=true ");
++            cliArgs.append("--web-security=false ");
++            cliArgs.append("--ssl-certificates-path=").append(authServerHome).append(certificatesPath).append(" ");
++            cliArgs.append("--ssl-client-certificate-file=").append(authServerHome).append(clientCertificateFile).append(" ");
++            cliArgs.append("--ssl-client-key-file=").append(authServerHome).append(clientKeyFile).append(" ");
++            cliArgs.append("--ssl-client-key-passphrase=" + clientKeyPassword).append(" ");
++
++            System.setProperty("keycloak.phantomjs.cli.args", cliArgs.toString());
+         }
+     }
+ 
+@@ -183,6 +198,8 @@ public void configureFlows() {
+         userId = user.getId();
+ 
+         user.singleAttribute("x509_certificate_identity","-");
++        user.singleAttribute("alternative_email", "test-user-altmail@localhost");
++        user.singleAttribute("upn", "test_upn_name@localhost");
+         updateUser(user);
+     }
+ 
+@@ -343,11 +360,20 @@ protected static X509AuthenticatorConfigModel createLoginSubjectEmail2UsernameOr
+                 .setUserIdentityMapperType(USERNAME_EMAIL);
+     }
+ 
+-    protected static X509AuthenticatorConfigModel createLoginSubjectAltNameEmail2UsernameOrEmailConfig() {
++    protected static X509AuthenticatorConfigModel createLoginSubjectAltNameEmail2UserAttributeConfig() {
+         return new X509AuthenticatorConfigModel()
+                 .setConfirmationPageAllowed(true)
+                 .setMappingSourceType(SUBJECTALTNAME_EMAIL)
+-                .setUserIdentityMapperType(USERNAME_EMAIL);
++                .setUserIdentityMapperType(USER_ATTRIBUTE)
++                .setCustomAttributeName("alternative_email");
++    }
++
++    protected static X509AuthenticatorConfigModel createLoginSubjectAltNameOtherName2UserAttributeConfig() {
++        return new X509AuthenticatorConfigModel()
++                .setConfirmationPageAllowed(true)
++                .setMappingSourceType(SUBJECTALTNAME_OTHERNAME)
++                .setUserIdentityMapperType(USER_ATTRIBUTE)
++                .setCustomAttributeName("upn");
+     }
+ 
+     protected static X509AuthenticatorConfigModel createLoginSubjectEmailWithKeyUsage(String keyUsage) {
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/x509/X509BrowserLoginSubjectAltNameEmailTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/x509/X509BrowserLoginSubjectAltNameTest.java
+similarity index 66%
+rename from testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/x509/X509BrowserLoginSubjectAltNameEmailTest.java
+rename to testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/x509/X509BrowserLoginSubjectAltNameTest.java
+index a91a492ff253..86110beb25d4 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/x509/X509BrowserLoginSubjectAltNameEmailTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/x509/X509BrowserLoginSubjectAltNameTest.java
+@@ -39,7 +39,7 @@
+  * @date 8/12/2016
+  */
+ 
+-public class X509BrowserLoginSubjectAltNameEmailTest extends AbstractX509AuthenticationTest {
++public class X509BrowserLoginSubjectAltNameTest extends AbstractX509AuthenticationTest {
+ 
+     @Page
+     @PhantomJSBrowser
+@@ -64,23 +64,8 @@ public void replaceTheDefaultDriver() {
+ 
+     @BeforeClass
+     public static void onBeforeTestClass() {
+-        if (Boolean.parseBoolean(System.getProperty("auth.server.jboss"))) {
+-            String authServerHome = System.getProperty("auth.server.home");
+-
+-            if (authServerHome != null && System.getProperty("auth.server.ssl.required") != null) {
+-                authServerHome = authServerHome + "/standalone/configuration";
+-                StringBuilder cliArgs = new StringBuilder();
+-
+-                cliArgs.append("--ignore-ssl-errors=true ");
+-                cliArgs.append("--web-security=false ");
+-                cliArgs.append("--ssl-certificates-path=" + authServerHome + "/ca.crt ");
+-                cliArgs.append("--ssl-client-certificate-file=" + authServerHome + "/certs/clients/test-user-san-email@localhost.cert.pem ");
+-                cliArgs.append("--ssl-client-key-file=" + authServerHome + "/certs/clients/test-user@localhost.key.pem ");
+-                cliArgs.append("--ssl-client-key-passphrase=password");
+-
+-                System.setProperty("keycloak.phantomjs.cli.args", cliArgs.toString());
+-            }
+-        }
++        configurePhantomJS("/ca.crt", "/certs/clients/test-user-san@localhost.cert.pem",
++                "/certs/clients/test-user@localhost.key.pem", "password");
+     }
+ 
+     private void login(X509AuthenticatorConfigModel config, String userId, String username, String attemptedUsername) {
+@@ -91,7 +76,7 @@ private void login(X509AuthenticatorConfigModel config, String userId, String us
+ 
+         loginConfirmationPage.open();
+ 
+-        Assert.assertTrue(loginConfirmationPage.getSubjectDistinguishedNameText().equals("CN=test-user, OU=Keycloak, O=Red Hat, L=Boston, ST=MA, C=US"));
++        Assert.assertEquals("EMAILADDRESS=test-user@localhost, CN=test-user, OU=Keycloak, O=Red Hat, L=Boston, ST=MA, C=US", loginConfirmationPage.getSubjectDistinguishedNameText());
+         Assert.assertEquals(username, loginConfirmationPage.getUsernameText());
+ 
+         loginConfirmationPage.confirm();
+@@ -107,7 +92,12 @@ private void login(X509AuthenticatorConfigModel config, String userId, String us
+     }
+ 
+     @Test
+-    public void loginAsUserFromCertSubjectEmail() {
+-        login(createLoginSubjectAltNameEmail2UsernameOrEmailConfig(), userId, "test-user@localhost", "test-user@localhost");
++    public void loginAsUserFromCertSANEmail() {
++        login(createLoginSubjectAltNameEmail2UserAttributeConfig(), userId, "test-user@localhost", "test-user-altmail@localhost");
++    }
++
++    @Test
++    public void loginAsUserFromCertSANUpn() {
++        login(createLoginSubjectAltNameOtherName2UserAttributeConfig(), userId, "test-user@localhost", "test_upn_name@localhost");
+     }
+ }
+\ No newline at end of file
+diff --git a/testsuite/utils/src/main/java/org/keycloak/testsuite/KeycloakServer.java b/testsuite/utils/src/main/java/org/keycloak/testsuite/KeycloakServer.java
+index 8871bfbeacdb..c78e542272e4 100755
+--- a/testsuite/utils/src/main/java/org/keycloak/testsuite/KeycloakServer.java
++++ b/testsuite/utils/src/main/java/org/keycloak/testsuite/KeycloakServer.java
+@@ -39,9 +39,14 @@
+ import org.keycloak.services.resources.KeycloakApplication;
+ import org.keycloak.testsuite.util.cli.TestsuiteCLI;
+ import org.keycloak.util.JsonSerialization;
++import org.xnio.Options;
++import org.xnio.SslClientAuthMode;
+ 
++import javax.net.ssl.KeyManager;
+ import javax.net.ssl.KeyManagerFactory;
+ import javax.net.ssl.SSLContext;
++import javax.net.ssl.TrustManager;
++import javax.net.ssl.TrustManagerFactory;
+ import javax.servlet.DispatcherType;
+ import java.io.File;
+ import java.io.FileInputStream;
+@@ -380,7 +385,9 @@ public void start() throws Throwable {
+                 .setIoThreads(config.getWorkerThreads() / 8);
+ 
+         if (config.getPortHttps() != -1) {
+-            builder = builder.addHttpsListener(config.getPortHttps(), config.getHost(), createSSLContext());
++            builder = builder
++                    .addHttpsListener(config.getPortHttps(), config.getHost(), createSSLContext())
++                    .setSocketOption(Options.SSL_CLIENT_AUTH_MODE, SslClientAuthMode.REQUESTED);
+         }
+ 
+         server = new UndertowJaxrsServer();
+@@ -476,12 +483,29 @@ private static void detectNodeName(KeycloakServerConfig config) {
+     }
+ 
+     private SSLContext createSSLContext() throws Exception {
++        KeyManager[] keyManagers = getKeyManagers();
++
++        if (keyManagers == null) {
++            return SSLContext.getDefault();
++        }
++
++        TrustManager[] trustManagers = getTrustManagers();
++
++        SSLContext sslContext = SSLContext.getInstance("TLS");
++        sslContext.init(keyManagers, trustManagers, null);
++        return sslContext;
++    }
++
++
++    private KeyManager[] getKeyManagers() throws Exception {
+         String keyStorePath = System.getProperty("keycloak.tls.keystore.path");
+ 
+         if (keyStorePath == null) {
+-            return SSLContext.getDefault();
++            return null;
+         }
+ 
++        log.infof("Loading keystore from file: %s", keyStorePath);
++
+         InputStream stream = Files.newInputStream(Paths.get(keyStorePath));
+ 
+         if (stream == null) {
+@@ -490,20 +514,41 @@ private SSLContext createSSLContext() throws Exception {
+ 
+         try (InputStream is = stream) {
+             KeyStore keyStore = KeyStore.getInstance("JKS");
+-
+             char[] keyStorePassword = System.getProperty("keycloak.tls.keystore.password", "password").toCharArray();
+-
+             keyStore.load(is, keyStorePassword);
+ 
+             KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+-
+             keyManagerFactory.init(keyStore, keyStorePassword);
+ 
+-            SSLContext sslContext = SSLContext.getInstance("TLS");
++            return keyManagerFactory.getKeyManagers();
++        }
++    }
++
++
++    private TrustManager[] getTrustManagers() throws Exception {
++        String trustStorePath = System.getProperty("keycloak.tls.truststore.path");
++
++        if (trustStorePath == null) {
++            return null;
++        }
++
++        log.infof("Loading truststore from file: %s", trustStorePath);
++
++        InputStream stream = Files.newInputStream(Paths.get(trustStorePath));
++
++        if (stream == null) {
++            throw new RuntimeException("Could not load truststore");
++        }
++
++        try (InputStream is = stream) {
++            KeyStore keyStore = KeyStore.getInstance("JKS");
++            char[] keyStorePassword = System.getProperty("keycloak.tls.truststore.password", "password").toCharArray();
++            keyStore.load(is, keyStorePassword);
+ 
+-            sslContext.init(keyManagerFactory.getKeyManagers(), null, null);
++            TrustManagerFactory trustManagerFactory = TrustManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
++            trustManagerFactory.init(keyStore);
+ 
+-            return sslContext;
++            return trustManagerFactory.getTrustManagers();
+         }
+     }
+ }
+diff --git a/testsuite/utils/src/main/resources/META-INF/keycloak-server.json b/testsuite/utils/src/main/resources/META-INF/keycloak-server.json
+index 5ed3ac19af5b..13f9b5764c82 100755
+--- a/testsuite/utils/src/main/resources/META-INF/keycloak-server.json
++++ b/testsuite/utils/src/main/resources/META-INF/keycloak-server.json
+@@ -118,5 +118,39 @@
+             "enabled": true
+         }
+ 
++    },
++
++    "login-protocol": {
++        "saml": {
++            "knownProtocols": [
++                "http=${auth.server.http.port}",
++                "https=${auth.server.https.port}"
++            ]
++        }
++    },
++
++    "x509cert-lookup": {
++        "provider": "${keycloak.x509cert.lookup.provider:default}",
++        "default": {
++            "enabled": true
++        },
++        "haproxy": {
++            "enabled": true,
++            "sslClientCert": "x-ssl-client-cert",
++            "sslCertChainPrefix": "x-ssl-client-cert-chain",
++            "certificateChainLength": 1
++        },
++        "apache": {
++            "enabled": true,
++            "sslClientCert": "x-ssl-client-cert",
++            "sslCertChainPrefix": "x-ssl-client-cert-chain",
++            "certificateChainLength": 1
++        },
++        "nginx": {
++            "enabled": true,
++            "sslClientCert": "x-ssl-client-cert",
++            "sslCertChainPrefix": "x-ssl-client-cert-chain",
++            "certificateChainLength": 1
++        }
+     }
+ }

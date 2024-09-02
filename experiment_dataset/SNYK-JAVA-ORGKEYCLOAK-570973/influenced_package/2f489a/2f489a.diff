@@ -1,0 +1,1081 @@
+diff --git a/common/src/main/java/org/keycloak/common/util/UriUtils.java b/common/src/main/java/org/keycloak/common/util/UriUtils.java
+index bbe718835bea..43c263e7b983 100755
+--- a/common/src/main/java/org/keycloak/common/util/UriUtils.java
++++ b/common/src/main/java/org/keycloak/common/util/UriUtils.java
+@@ -18,10 +18,14 @@
+ package org.keycloak.common.util;
+ 
+ import java.io.UnsupportedEncodingException;
++import java.net.MalformedURLException;
+ import java.net.URI;
++import java.net.URL;
+ import java.net.URLDecoder;
+ import java.util.regex.Pattern;
+ 
++import org.keycloak.common.enums.SslRequired;
++
+ /**
+  * @author <a href="mailto:sthorger@redhat.com">Stian Thorgersen</a>
+  */
+@@ -84,4 +88,28 @@ public static MultivaluedHashMap<String, String> decodeQueryString(String queryS
+     public static String stripQueryParam(String url, String name){
+         return url.replaceFirst("[\\?&]"+name+"=[^&]*$|"+name+"=[^&]*&", "");
+     }
++
++    public static void checkUrl(SslRequired sslRequired, String url, String name) throws IllegalArgumentException{
++        if (url == null) {
++            return;
++        }
++
++        URL parsed;
++
++        try {
++            parsed = new URL(url);
++        } catch (MalformedURLException e) {
++            throw new IllegalArgumentException("The url [" + name + "] is malformed", e);
++        }
++
++        String protocol = parsed.getProtocol().toLowerCase();
++
++        if (!("http".equalsIgnoreCase(protocol) || "https".equalsIgnoreCase(protocol))) {
++            throw new IllegalArgumentException("Invalid protocol/scheme for url [" + name + "]");
++        }
++
++        if (!"https".equals(protocol) && sslRequired.isRequired(url)) {
++            throw new IllegalArgumentException("The url [" + name + "] requires secure connections");
++        }
++    }
+ }
+diff --git a/server-spi-private/src/main/java/org/keycloak/broker/provider/IdentityProviderFactory.java b/server-spi-private/src/main/java/org/keycloak/broker/provider/IdentityProviderFactory.java
+index c189316288c8..ad3b8402951a 100755
+--- a/server-spi-private/src/main/java/org/keycloak/broker/provider/IdentityProviderFactory.java
++++ b/server-spi-private/src/main/java/org/keycloak/broker/provider/IdentityProviderFactory.java
+@@ -54,4 +54,14 @@ public interface IdentityProviderFactory<T extends IdentityProvider> extends Pro
+      * @return
+      */
+     Map<String, String> parseConfig(KeycloakSession session, InputStream inputStream);
++
++    /**
++     * <p>Creates a provider specific {@link IdentityProviderModel} instance.
++     * 
++     * <p>Providers may want to implement their own {@link IdentityProviderModel} type so that validations
++     * can be performed when managing the provider configuration
++     * 
++     * @return the provider specific instance
++     */
++    <C extends IdentityProviderModel> C createConfig();
+ }
+\ No newline at end of file
+diff --git a/server-spi-private/src/main/java/org/keycloak/models/utils/RepresentationToModel.java b/server-spi-private/src/main/java/org/keycloak/models/utils/RepresentationToModel.java
+index 7b455e7da204..9982bbe09154 100755
+--- a/server-spi-private/src/main/java/org/keycloak/models/utils/RepresentationToModel.java
++++ b/server-spi-private/src/main/java/org/keycloak/models/utils/RepresentationToModel.java
+@@ -49,6 +49,9 @@
+ import org.keycloak.authorization.store.ResourceStore;
+ import org.keycloak.authorization.store.ScopeStore;
+ import org.keycloak.authorization.store.StoreFactory;
++import org.keycloak.broker.provider.IdentityProvider;
++import org.keycloak.broker.provider.IdentityProviderFactory;
++import org.keycloak.broker.social.SocialIdentityProvider;
+ import org.keycloak.common.enums.SslRequired;
+ import org.keycloak.common.util.MultivaluedHashMap;
+ import org.keycloak.common.util.UriUtils;
+@@ -285,7 +288,7 @@ public static void importRealm(KeycloakSession session, RealmRepresentation rep,
+             DefaultRequiredActions.addActions(newRealm);
+         }
+ 
+-        importIdentityProviders(rep, newRealm);
++        importIdentityProviders(rep, newRealm, session);
+         importIdentityProviderMappers(rep, newRealm);
+ 
+         Map<String, ClientScopeModel> clientScopes = new HashMap<>();
+@@ -1856,10 +1859,10 @@ public static void createClientRoleMappings(ClientModel clientModel, UserModel u
+         }
+     }
+ 
+-    private static void importIdentityProviders(RealmRepresentation rep, RealmModel newRealm) {
++    private static void importIdentityProviders(RealmRepresentation rep, RealmModel newRealm, KeycloakSession session) {
+         if (rep.getIdentityProviders() != null) {
+             for (IdentityProviderRepresentation representation : rep.getIdentityProviders()) {
+-                newRealm.addIdentityProvider(toModel(newRealm, representation));
++                newRealm.addIdentityProvider(toModel(newRealm, representation, session));
+             }
+         }
+     }
+@@ -1872,8 +1875,20 @@ private static void importIdentityProviderMappers(RealmRepresentation rep, Realm
+         }
+     }
+ 
+-    public static IdentityProviderModel toModel(RealmModel realm, IdentityProviderRepresentation representation) {
+-        IdentityProviderModel identityProviderModel = new IdentityProviderModel();
++    public static IdentityProviderModel toModel(RealmModel realm, IdentityProviderRepresentation representation, KeycloakSession session) {
++        IdentityProviderFactory providerFactory = (IdentityProviderFactory) session.getKeycloakSessionFactory().getProviderFactory(
++                IdentityProvider.class, representation.getProviderId());
++        
++        if (providerFactory == null) {
++            providerFactory = (IdentityProviderFactory) session.getKeycloakSessionFactory().getProviderFactory(
++                    SocialIdentityProvider.class, representation.getProviderId());
++        }
++        
++        if (providerFactory == null) {
++            throw new IllegalArgumentException("Invalid identity provider id [" + representation.getProviderId() + "]");
++        }
++        
++        IdentityProviderModel identityProviderModel = providerFactory.createConfig();
+ 
+         identityProviderModel.setInternalId(representation.getInternalId());
+         identityProviderModel.setAlias(representation.getAlias());
+@@ -1908,6 +1923,8 @@ public static IdentityProviderModel toModel(RealmModel realm, IdentityProviderRe
+             }
+             identityProviderModel.setPostBrokerLoginFlowId(flowModel.getId());
+         }
++        
++        identityProviderModel.validate(realm);
+ 
+         return identityProviderModel;
+     }
+diff --git a/server-spi/src/main/java/org/keycloak/models/IdentityProviderModel.java b/server-spi/src/main/java/org/keycloak/models/IdentityProviderModel.java
+index 6fb5c59679dd..846df4e75f7d 100755
+--- a/server-spi/src/main/java/org/keycloak/models/IdentityProviderModel.java
++++ b/server-spi/src/main/java/org/keycloak/models/IdentityProviderModel.java
+@@ -196,5 +196,15 @@ public String getDisplayName() {
+     public void setDisplayName(String displayName) {
+         this.displayName = displayName;
+     }
+-    
++
++    /**
++     * <p>Validates this configuration.
++     * 
++     * <p>Sub-classes can override this method in order to enforce provider specific validations.
++     * 
++     * @param realm the realm
++     */
++    public void validate(RealmModel realm) {
++        
++    }
+ }
+diff --git a/services/src/main/java/org/keycloak/broker/oidc/KeycloakOIDCIdentityProviderFactory.java b/services/src/main/java/org/keycloak/broker/oidc/KeycloakOIDCIdentityProviderFactory.java
+index 87e7b73ab46a..48bfd8254732 100755
+--- a/services/src/main/java/org/keycloak/broker/oidc/KeycloakOIDCIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/broker/oidc/KeycloakOIDCIdentityProviderFactory.java
+@@ -48,7 +48,10 @@ public String getId() {
+     @Override
+     public Map<String, String> parseConfig(KeycloakSession session, InputStream inputStream) {
+         return OIDCIdentityProviderFactory.parseOIDCConfig(session, inputStream);
+-
+     }
+ 
+- }
++    @Override
++    public OIDCIdentityProviderConfig createConfig() {
++        return new OIDCIdentityProviderConfig();
++    }
++}
+diff --git a/services/src/main/java/org/keycloak/broker/oidc/OAuth2IdentityProviderConfig.java b/services/src/main/java/org/keycloak/broker/oidc/OAuth2IdentityProviderConfig.java
+index af26468a4a3d..5838376f50d7 100644
+--- a/services/src/main/java/org/keycloak/broker/oidc/OAuth2IdentityProviderConfig.java
++++ b/services/src/main/java/org/keycloak/broker/oidc/OAuth2IdentityProviderConfig.java
+@@ -16,7 +16,12 @@
+  */
+ package org.keycloak.broker.oidc;
+ 
++import static org.keycloak.common.util.UriUtils.checkUrl;
++
++import org.keycloak.common.enums.SslRequired;
+ import org.keycloak.models.IdentityProviderModel;
++import org.keycloak.models.KeycloakSession;
++import org.keycloak.models.RealmModel;
+ import org.keycloak.protocol.oidc.OIDCLoginProtocol;
+ 
+ /**
+@@ -28,6 +33,10 @@ public OAuth2IdentityProviderConfig(IdentityProviderModel model) {
+         super(model);
+     }
+ 
++    public OAuth2IdentityProviderConfig() {
++        super();
++    }
++
+     public String getAuthorizationUrl() {
+         return getConfig().get("authorizationUrl");
+     }
+@@ -123,4 +132,13 @@ public String getForwardParameters() {
+     public void setForwardParameters(String forwardParameters) {
+        getConfig().put("forwardParameters", forwardParameters);
+     }
++
++    @Override
++    public void validate(RealmModel realm) {
++        SslRequired sslRequired = realm.getSslRequired();
++
++        checkUrl(sslRequired, getAuthorizationUrl(), "authorization_url");
++        checkUrl(sslRequired, getTokenUrl(), "token_url");
++        checkUrl(sslRequired, getUserInfoUrl(), "userinfo_url");
++    }
+ }
+diff --git a/services/src/main/java/org/keycloak/broker/oidc/OIDCIdentityProviderConfig.java b/services/src/main/java/org/keycloak/broker/oidc/OIDCIdentityProviderConfig.java
+index bb3d286f6057..002848fec906 100755
+--- a/services/src/main/java/org/keycloak/broker/oidc/OIDCIdentityProviderConfig.java
++++ b/services/src/main/java/org/keycloak/broker/oidc/OIDCIdentityProviderConfig.java
+@@ -16,7 +16,12 @@
+  */
+ package org.keycloak.broker.oidc;
+ 
++import static org.keycloak.common.util.UriUtils.checkUrl;
++
++import org.keycloak.common.enums.SslRequired;
+ import org.keycloak.models.IdentityProviderModel;
++import org.keycloak.models.KeycloakSession;
++import org.keycloak.models.RealmModel;
+ 
+ /**
+  * @author Pedro Igor
+@@ -33,6 +38,10 @@ public OIDCIdentityProviderConfig(IdentityProviderModel identityProviderModel) {
+         super(identityProviderModel);
+     }
+ 
++    public OIDCIdentityProviderConfig() {
++        super();
++    }
++
+     public String getPrompt() {
+         return getConfig().get("prompt");
+     }
+@@ -122,4 +131,12 @@ public int getAllowedClockSkew() {
+             return 0;
+         }
+     }
++
++    @Override 
++    public void validate(RealmModel realm) {
++        super.validate(realm);
++        SslRequired sslRequired = realm.getSslRequired();
++        checkUrl(sslRequired, getJwksUrl(), "jwks_url");
++        checkUrl(sslRequired, getLogoutUrl(), "logout_url");
++    }
+ }
+diff --git a/services/src/main/java/org/keycloak/broker/oidc/OIDCIdentityProviderFactory.java b/services/src/main/java/org/keycloak/broker/oidc/OIDCIdentityProviderFactory.java
+index 346cf82da3b5..64a3ea2fb8b4 100755
+--- a/services/src/main/java/org/keycloak/broker/oidc/OIDCIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/broker/oidc/OIDCIdentityProviderFactory.java
+@@ -43,6 +43,11 @@ public OIDCIdentityProvider create(KeycloakSession session, IdentityProviderMode
+         return new OIDCIdentityProvider(session, new OIDCIdentityProviderConfig(model));
+     }
+ 
++    @Override
++    public OIDCIdentityProviderConfig createConfig() {
++        return new OIDCIdentityProviderConfig();
++    }
++
+     @Override
+     public String getId() {
+         return PROVIDER_ID;
+@@ -60,7 +65,7 @@ protected static Map<String, String> parseOIDCConfig(KeycloakSession session, In
+         } catch (IOException e) {
+             throw new RuntimeException("failed to load openid connect metadata", e);
+         }
+-        OIDCIdentityProviderConfig config = new OIDCIdentityProviderConfig(new IdentityProviderModel());
++        OIDCIdentityProviderConfig config = new OIDCIdentityProviderConfig();
+         config.setIssuer(rep.getIssuer());
+         config.setLogoutUrl(rep.getLogoutEndpoint());
+         config.setAuthorizationUrl(rep.getAuthorizationEndpoint());
+diff --git a/services/src/main/java/org/keycloak/broker/saml/SAMLIdentityProviderConfig.java b/services/src/main/java/org/keycloak/broker/saml/SAMLIdentityProviderConfig.java
+index 37fa434c58d8..f80da3db00fc 100755
+--- a/services/src/main/java/org/keycloak/broker/saml/SAMLIdentityProviderConfig.java
++++ b/services/src/main/java/org/keycloak/broker/saml/SAMLIdentityProviderConfig.java
+@@ -16,8 +16,13 @@
+  */
+ package org.keycloak.broker.saml;
+ 
++import static org.keycloak.common.util.UriUtils.checkUrl;
++
++import org.keycloak.common.enums.SslRequired;
+ import org.keycloak.models.IdentityProviderModel;
+ 
++import org.keycloak.models.KeycloakSession;
++import org.keycloak.models.RealmModel;
+ import org.keycloak.protocol.saml.SamlPrincipalType;
+ import org.keycloak.saml.common.util.XmlKeyInfoKeyNameTransformer;
+ 
+@@ -276,4 +281,11 @@ public void setPrincipalAttribute(String principalAttribute) {
+         getConfig().put(PRINCIPAL_ATTRIBUTE, principalAttribute);
+     }
+ 
++    @Override
++    public void validate(RealmModel realm) {
++        SslRequired sslRequired = realm.getSslRequired();
++
++        checkUrl(sslRequired, getSingleLogoutServiceUrl(), SINGLE_LOGOUT_SERVICE_URL);
++        checkUrl(sslRequired, getSingleSignOnServiceUrl(), SINGLE_SIGN_ON_SERVICE_URL);
++    }
+ }
+diff --git a/services/src/main/java/org/keycloak/broker/saml/SAMLIdentityProviderFactory.java b/services/src/main/java/org/keycloak/broker/saml/SAMLIdentityProviderFactory.java
+index f538cc5ab055..e6cd56653012 100755
+--- a/services/src/main/java/org/keycloak/broker/saml/SAMLIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/broker/saml/SAMLIdentityProviderFactory.java
+@@ -58,6 +58,11 @@ public SAMLIdentityProvider create(KeycloakSession session, IdentityProviderMode
+         return new SAMLIdentityProvider(session, new SAMLIdentityProviderConfig(model), destinationValidator);
+     }
+ 
++    @Override
++    public SAMLIdentityProviderConfig createConfig() {
++        return new SAMLIdentityProviderConfig();
++    }
++
+     @Override
+     public Map<String, String> parseConfig(KeycloakSession session, InputStream inputStream) {
+         try {
+diff --git a/services/src/main/java/org/keycloak/partialimport/IdentityProvidersPartialImport.java b/services/src/main/java/org/keycloak/partialimport/IdentityProvidersPartialImport.java
+index b68d1161177c..de3dbfd8358f 100644
+--- a/services/src/main/java/org/keycloak/partialimport/IdentityProvidersPartialImport.java
++++ b/services/src/main/java/org/keycloak/partialimport/IdentityProvidersPartialImport.java
+@@ -72,7 +72,7 @@ public void remove(RealmModel realm, KeycloakSession session, IdentityProviderRe
+     @Override
+     public void create(RealmModel realm, KeycloakSession session, IdentityProviderRepresentation idpRep) {
+         idpRep.setInternalId(KeycloakModelUtils.generateId());
+-        IdentityProviderModel identityProvider = RepresentationToModel.toModel(realm, idpRep);
++        IdentityProviderModel identityProvider = RepresentationToModel.toModel(realm, idpRep, session);
+         realm.addIdentityProvider(identityProvider);
+     }
+ 
+diff --git a/services/src/main/java/org/keycloak/services/resources/admin/IdentityProviderResource.java b/services/src/main/java/org/keycloak/services/resources/admin/IdentityProviderResource.java
+index 80837af00758..2274d6cbd74b 100644
+--- a/services/src/main/java/org/keycloak/services/resources/admin/IdentityProviderResource.java
++++ b/services/src/main/java/org/keycloak/services/resources/admin/IdentityProviderResource.java
+@@ -16,6 +16,8 @@
+  */
+ package org.keycloak.services.resources.admin;
+ 
++import static javax.ws.rs.core.Response.Status.BAD_REQUEST;
++
+ import org.jboss.logging.Logger;
+ import org.jboss.resteasy.annotations.cache.NoCache;
+ import javax.ws.rs.NotFoundException;
+@@ -162,6 +164,8 @@ public Response update(IdentityProviderRepresentation providerRep) {
+             adminEvent.operation(OperationType.UPDATE).resourcePath(session.getContext().getUri()).representation(providerRep).success();
+ 
+             return Response.noContent().build();
++        } catch (IllegalArgumentException e) {
++            return ErrorResponse.error("Invalid request", BAD_REQUEST);
+         } catch (ModelDuplicateException e) {
+             return ErrorResponse.exists("Identity Provider " + providerRep.getAlias() + " already exists");
+         }
+@@ -176,7 +180,7 @@ private void updateIdpFromRep(IdentityProviderRepresentation providerRep, RealmM
+             lookUpProviderIdByAlias(realm, providerRep);
+         }
+ 
+-        IdentityProviderModel updated = RepresentationToModel.toModel(realm, providerRep);
++        IdentityProviderModel updated = RepresentationToModel.toModel(realm, providerRep, session);
+ 
+         if (updated.getConfig() != null && ComponentRepresentation.SECRET_VALUE.equals(updated.getConfig().get("clientSecret"))) {
+             updated.getConfig().put("clientSecret", identityProviderModel.getConfig() != null ? identityProviderModel.getConfig().get("clientSecret") : null);
+diff --git a/services/src/main/java/org/keycloak/services/resources/admin/IdentityProvidersResource.java b/services/src/main/java/org/keycloak/services/resources/admin/IdentityProvidersResource.java
+index bc3e78e3b982..f88293dc427b 100755
+--- a/services/src/main/java/org/keycloak/services/resources/admin/IdentityProvidersResource.java
++++ b/services/src/main/java/org/keycloak/services/resources/admin/IdentityProvidersResource.java
+@@ -183,7 +183,7 @@ public Response create(IdentityProviderRepresentation representation) {
+         this.auth.realm().requireManageIdentityProviders();
+ 
+         try {
+-            IdentityProviderModel identityProvider = RepresentationToModel.toModel(realm, representation);
++            IdentityProviderModel identityProvider = RepresentationToModel.toModel(realm, representation, session);
+             this.realm.addIdentityProvider(identityProvider);
+ 
+             representation.setInternalId(identityProvider.getInternalId());
+@@ -191,6 +191,8 @@ public Response create(IdentityProviderRepresentation representation) {
+                     .representation(StripSecretsUtils.strip(representation)).success();
+             
+             return Response.created(session.getContext().getUri().getAbsolutePathBuilder().path(representation.getAlias()).build()).build();
++        } catch (IllegalArgumentException e) {
++            return ErrorResponse.error("Invalid request", BAD_REQUEST);
+         } catch (ModelDuplicateException e) {
+             return ErrorResponse.exists("Identity Provider " + representation.getAlias() + " already exists");
+         }
+diff --git a/services/src/main/java/org/keycloak/social/bitbucket/BitbucketIdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/bitbucket/BitbucketIdentityProviderFactory.java
+index b736d741818f..a2191647359f 100755
+--- a/services/src/main/java/org/keycloak/social/bitbucket/BitbucketIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/bitbucket/BitbucketIdentityProviderFactory.java
+@@ -39,6 +39,11 @@ public BitbucketIdentityProvider create(KeycloakSession session, IdentityProvide
+         return new BitbucketIdentityProvider(session, new OAuth2IdentityProviderConfig(model));
+     }
+ 
++    @Override
++    public OAuth2IdentityProviderConfig createConfig() {
++        return new OAuth2IdentityProviderConfig();
++    }
++
+     @Override
+     public String getId() {
+         return PROVIDER_ID;
+diff --git a/services/src/main/java/org/keycloak/social/facebook/FacebookIdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/facebook/FacebookIdentityProviderFactory.java
+index 26149a1ef6c8..58c55e3b6e8e 100755
+--- a/services/src/main/java/org/keycloak/social/facebook/FacebookIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/facebook/FacebookIdentityProviderFactory.java
+@@ -39,6 +39,11 @@ public FacebookIdentityProvider create(KeycloakSession session, IdentityProvider
+         return new FacebookIdentityProvider(session, new OAuth2IdentityProviderConfig(model));
+     }
+ 
++    @Override
++    public OAuth2IdentityProviderConfig createConfig() {
++        return new OAuth2IdentityProviderConfig();
++    }
++
+     @Override
+     public String getId() {
+         return PROVIDER_ID;
+diff --git a/services/src/main/java/org/keycloak/social/github/GitHubIdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/github/GitHubIdentityProviderFactory.java
+index e1c05b85d16c..4e75c9a460bc 100755
+--- a/services/src/main/java/org/keycloak/social/github/GitHubIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/github/GitHubIdentityProviderFactory.java
+@@ -39,6 +39,11 @@ public GitHubIdentityProvider create(KeycloakSession session, IdentityProviderMo
+         return new GitHubIdentityProvider(session, new OAuth2IdentityProviderConfig(model));
+     }
+ 
++    @Override
++    public OAuth2IdentityProviderConfig createConfig() {
++        return new OAuth2IdentityProviderConfig();
++    }
++
+     @Override
+     public String getId() {
+         return PROVIDER_ID;
+diff --git a/services/src/main/java/org/keycloak/social/gitlab/GitLabIdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/gitlab/GitLabIdentityProviderFactory.java
+index 35e7a5e03433..0bc2c4143ea7 100755
+--- a/services/src/main/java/org/keycloak/social/gitlab/GitLabIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/gitlab/GitLabIdentityProviderFactory.java
+@@ -16,7 +16,6 @@
+  */
+ package org.keycloak.social.gitlab;
+ 
+-import org.keycloak.broker.oidc.OAuth2IdentityProviderConfig;
+ import org.keycloak.broker.oidc.OIDCIdentityProviderConfig;
+ import org.keycloak.broker.provider.AbstractIdentityProviderFactory;
+ import org.keycloak.broker.social.SocialIdentityProviderFactory;
+@@ -40,6 +39,11 @@ public GitLabIdentityProvider create(KeycloakSession session, IdentityProviderMo
+         return new GitLabIdentityProvider(session, new OIDCIdentityProviderConfig(model));
+     }
+ 
++    @Override
++    public OIDCIdentityProviderConfig createConfig() {
++        return new OIDCIdentityProviderConfig();
++    }
++
+     @Override
+     public String getId() {
+         return PROVIDER_ID;
+diff --git a/services/src/main/java/org/keycloak/social/google/GoogleIdentityProviderConfig.java b/services/src/main/java/org/keycloak/social/google/GoogleIdentityProviderConfig.java
+index c61de905ee5a..d842738c8b79 100644
+--- a/services/src/main/java/org/keycloak/social/google/GoogleIdentityProviderConfig.java
++++ b/services/src/main/java/org/keycloak/social/google/GoogleIdentityProviderConfig.java
+@@ -28,6 +28,10 @@ public GoogleIdentityProviderConfig(IdentityProviderModel model) {
+         super(model);
+     }
+ 
++    public GoogleIdentityProviderConfig() {
++        
++    }
++
+     public boolean isUserIp() {
+         String userIp = getConfig().get("userIp");
+         return userIp == null ? false : Boolean.valueOf(userIp);
+diff --git a/services/src/main/java/org/keycloak/social/google/GoogleIdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/google/GoogleIdentityProviderFactory.java
+index b35fd173b8c8..e7537792291f 100755
+--- a/services/src/main/java/org/keycloak/social/google/GoogleIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/google/GoogleIdentityProviderFactory.java
+@@ -16,7 +16,6 @@
+  */
+ package org.keycloak.social.google;
+ 
+-import org.keycloak.broker.oidc.OIDCIdentityProviderConfig;
+ import org.keycloak.broker.provider.AbstractIdentityProviderFactory;
+ import org.keycloak.models.IdentityProviderModel;
+ import org.keycloak.broker.social.SocialIdentityProviderFactory;
+@@ -39,6 +38,11 @@ public GoogleIdentityProvider create(KeycloakSession session, IdentityProviderMo
+         return new GoogleIdentityProvider(session, new GoogleIdentityProviderConfig(model));
+     }
+ 
++    @Override
++    public GoogleIdentityProviderConfig createConfig() {
++        return new GoogleIdentityProviderConfig();
++    }
++
+     @Override
+     public String getId() {
+         return PROVIDER_ID;
+diff --git a/services/src/main/java/org/keycloak/social/instagram/InstagramIdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/instagram/InstagramIdentityProviderFactory.java
+index 8eaf333a6707..53e8e59fa3b1 100755
+--- a/services/src/main/java/org/keycloak/social/instagram/InstagramIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/instagram/InstagramIdentityProviderFactory.java
+@@ -39,6 +39,11 @@ public InstagramIdentityProvider create(KeycloakSession session, IdentityProvide
+         return new InstagramIdentityProvider(session, new OAuth2IdentityProviderConfig(model));
+     }
+ 
++    @Override
++    public OAuth2IdentityProviderConfig createConfig() {
++        return new OAuth2IdentityProviderConfig();
++    }
++
+     @Override
+     public String getId() {
+         return PROVIDER_ID;
+diff --git a/services/src/main/java/org/keycloak/social/linkedin/LinkedInIdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/linkedin/LinkedInIdentityProviderFactory.java
+index 10b94b45d9bc..944039ad055b 100755
+--- a/services/src/main/java/org/keycloak/social/linkedin/LinkedInIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/linkedin/LinkedInIdentityProviderFactory.java
+@@ -40,6 +40,11 @@ public LinkedInIdentityProvider create(KeycloakSession session, IdentityProvider
+ 		return new LinkedInIdentityProvider(session, new OAuth2IdentityProviderConfig(model));
+ 	}
+ 
++	@Override
++	public OAuth2IdentityProviderConfig createConfig() {
++		return new OAuth2IdentityProviderConfig();
++	}
++
+ 	@Override
+ 	public String getId() {
+ 		return PROVIDER_ID;
+diff --git a/services/src/main/java/org/keycloak/social/microsoft/MicrosoftIdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/microsoft/MicrosoftIdentityProviderFactory.java
+index eee3e8704295..74f875f15b7a 100644
+--- a/services/src/main/java/org/keycloak/social/microsoft/MicrosoftIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/microsoft/MicrosoftIdentityProviderFactory.java
+@@ -39,6 +39,11 @@ public MicrosoftIdentityProvider create(KeycloakSession session, IdentityProvide
+         return new MicrosoftIdentityProvider(session, new OAuth2IdentityProviderConfig(model));
+     }
+ 
++    @Override
++    public OAuth2IdentityProviderConfig createConfig() {
++        return new OAuth2IdentityProviderConfig();
++    }
++
+     @Override
+     public String getId() {
+         return PROVIDER_ID;
+diff --git a/services/src/main/java/org/keycloak/social/openshift/OpenshiftV3IdentityProviderConfig.java b/services/src/main/java/org/keycloak/social/openshift/OpenshiftV3IdentityProviderConfig.java
+index f7320b4791d0..30e18dfdf064 100644
+--- a/services/src/main/java/org/keycloak/social/openshift/OpenshiftV3IdentityProviderConfig.java
++++ b/services/src/main/java/org/keycloak/social/openshift/OpenshiftV3IdentityProviderConfig.java
+@@ -10,6 +10,10 @@ public OpenshiftV3IdentityProviderConfig(IdentityProviderModel identityProviderM
+         super(identityProviderModel);
+     }
+ 
++    public OpenshiftV3IdentityProviderConfig() {
++        
++    }
++
+     public String getBaseUrl() {
+         return getConfig().get(BASE_URL);
+     }
+diff --git a/services/src/main/java/org/keycloak/social/openshift/OpenshiftV3IdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/openshift/OpenshiftV3IdentityProviderFactory.java
+index d9708a1f90ec..18e225b5face 100644
+--- a/services/src/main/java/org/keycloak/social/openshift/OpenshiftV3IdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/openshift/OpenshiftV3IdentityProviderFactory.java
+@@ -19,6 +19,11 @@ public OpenshiftV3IdentityProvider create(KeycloakSession keycloakSession, Ident
+         return new OpenshiftV3IdentityProvider(keycloakSession, new OpenshiftV3IdentityProviderConfig(identityProviderModel));
+     }
+ 
++    @Override
++    public OpenshiftV3IdentityProviderConfig createConfig() {
++        return new OpenshiftV3IdentityProviderConfig();
++    }
++
+     @Override
+     public String getId() {
+         return PROVIDER_ID;
+diff --git a/services/src/main/java/org/keycloak/social/openshift/OpenshiftV4IdentityProviderConfig.java b/services/src/main/java/org/keycloak/social/openshift/OpenshiftV4IdentityProviderConfig.java
+index 4b2f7e71a4d2..5161315cc242 100644
+--- a/services/src/main/java/org/keycloak/social/openshift/OpenshiftV4IdentityProviderConfig.java
++++ b/services/src/main/java/org/keycloak/social/openshift/OpenshiftV4IdentityProviderConfig.java
+@@ -19,6 +19,9 @@ public OpenshiftV4IdentityProviderConfig(IdentityProviderModel identityProviderM
+         super(identityProviderModel);
+     }
+ 
++    public OpenshiftV4IdentityProviderConfig() {
++    }
++
+     private String trimTrailingSlash(String baseUrl) {
+         if (baseUrl != null && baseUrl.endsWith("/")) {
+             baseUrl = baseUrl.substring(0, baseUrl.length() - 1);
+diff --git a/services/src/main/java/org/keycloak/social/openshift/OpenshiftV4IdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/openshift/OpenshiftV4IdentityProviderFactory.java
+index 257327420f9c..0fd7d8a577ac 100644
+--- a/services/src/main/java/org/keycloak/social/openshift/OpenshiftV4IdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/openshift/OpenshiftV4IdentityProviderFactory.java
+@@ -30,4 +30,8 @@ public String getId() {
+         return PROVIDER_ID;
+     }
+ 
++    @Override
++    public OpenshiftV4IdentityProviderConfig createConfig() {
++        return new OpenshiftV4IdentityProviderConfig();
++    }
+ }
+diff --git a/services/src/main/java/org/keycloak/social/paypal/PayPalIdentityProviderConfig.java b/services/src/main/java/org/keycloak/social/paypal/PayPalIdentityProviderConfig.java
+index dc94e3addf20..d119e4566fda 100644
+--- a/services/src/main/java/org/keycloak/social/paypal/PayPalIdentityProviderConfig.java
++++ b/services/src/main/java/org/keycloak/social/paypal/PayPalIdentityProviderConfig.java
+@@ -28,6 +28,10 @@ public PayPalIdentityProviderConfig(IdentityProviderModel model) {
+         super(model);
+     }
+ 
++    public PayPalIdentityProviderConfig() {
++        
++    }
++
+     public boolean targetSandbox() {
+         String sandbox = getConfig().get("sandbox");
+         return sandbox == null ? false : Boolean.valueOf(sandbox);
+diff --git a/services/src/main/java/org/keycloak/social/paypal/PayPalIdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/paypal/PayPalIdentityProviderFactory.java
+index b0b554126a24..28be0f7f2583 100644
+--- a/services/src/main/java/org/keycloak/social/paypal/PayPalIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/paypal/PayPalIdentityProviderFactory.java
+@@ -39,6 +39,11 @@ public PayPalIdentityProvider create(KeycloakSession session, IdentityProviderMo
+         return new PayPalIdentityProvider(session, new PayPalIdentityProviderConfig(model));
+     }
+ 
++    @Override
++    public PayPalIdentityProviderConfig createConfig() {
++        return new PayPalIdentityProviderConfig();
++    }
++
+     @Override
+     public String getId() {
+         return PROVIDER_ID;
+diff --git a/services/src/main/java/org/keycloak/social/stackoverflow/StackOverflowIdentityProviderConfig.java b/services/src/main/java/org/keycloak/social/stackoverflow/StackOverflowIdentityProviderConfig.java
+index 07882bfa4be2..72f365069b59 100644
+--- a/services/src/main/java/org/keycloak/social/stackoverflow/StackOverflowIdentityProviderConfig.java
++++ b/services/src/main/java/org/keycloak/social/stackoverflow/StackOverflowIdentityProviderConfig.java
+@@ -28,7 +28,11 @@ public StackOverflowIdentityProviderConfig(IdentityProviderModel model) {
+ 		super(model);
+ 	}
+ 
+-	public String getKey() {
++    public StackOverflowIdentityProviderConfig() {
++        
++    }
++
++    public String getKey() {
+ 		return getConfig().get("key");
+ 	}
+ 
+diff --git a/services/src/main/java/org/keycloak/social/stackoverflow/StackoverflowIdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/stackoverflow/StackoverflowIdentityProviderFactory.java
+index 4c8deb9d2a65..577999ab43ff 100755
+--- a/services/src/main/java/org/keycloak/social/stackoverflow/StackoverflowIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/stackoverflow/StackoverflowIdentityProviderFactory.java
+@@ -40,6 +40,11 @@ public StackoverflowIdentityProvider create(KeycloakSession session, IdentityPro
+ 		return new StackoverflowIdentityProvider(session, new StackOverflowIdentityProviderConfig(model));
+ 	}
+ 
++	@Override
++	public StackOverflowIdentityProviderConfig createConfig() {
++		return new StackOverflowIdentityProviderConfig();
++	}
++
+ 	@Override
+ 	public String getId() {
+ 		return PROVIDER_ID;
+diff --git a/services/src/main/java/org/keycloak/social/twitter/TwitterIdentityProviderFactory.java b/services/src/main/java/org/keycloak/social/twitter/TwitterIdentityProviderFactory.java
+index 74e1a3d6d0d1..79b2754722d2 100755
+--- a/services/src/main/java/org/keycloak/social/twitter/TwitterIdentityProviderFactory.java
++++ b/services/src/main/java/org/keycloak/social/twitter/TwitterIdentityProviderFactory.java
+@@ -39,6 +39,11 @@ public TwitterIdentityProvider create(KeycloakSession session, IdentityProviderM
+         return new TwitterIdentityProvider(session, new OAuth2IdentityProviderConfig(model));
+     }
+ 
++    @Override
++    public OAuth2IdentityProviderConfig createConfig() {
++        return new OAuth2IdentityProviderConfig();
++    }
++
+     @Override
+     public String getId() {
+         return PROVIDER_ID;
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/IdentityProviderTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/IdentityProviderTest.java
+index b09158b16372..328d8c581bfc 100755
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/IdentityProviderTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/IdentityProviderTest.java
+@@ -17,9 +17,13 @@
+ 
+ package org.keycloak.testsuite.admin;
+ 
++import org.hamcrest.Matchers;
+ import org.jboss.resteasy.plugins.providers.multipart.MultipartFormDataOutput;
++import org.junit.Rule;
+ import org.junit.Test;
++import org.junit.rules.ExpectedException;
+ import org.keycloak.admin.client.resource.IdentityProviderResource;
++import org.keycloak.common.enums.SslRequired;
+ import org.keycloak.dom.saml.v2.metadata.EndpointType;
+ import org.keycloak.dom.saml.v2.metadata.EntityDescriptorType;
+ import org.keycloak.dom.saml.v2.metadata.IndexedEndpointType;
+@@ -35,12 +39,15 @@
+ import org.keycloak.representations.idm.IdentityProviderMapperRepresentation;
+ import org.keycloak.representations.idm.IdentityProviderMapperTypeRepresentation;
+ import org.keycloak.representations.idm.IdentityProviderRepresentation;
++import org.keycloak.representations.idm.RealmRepresentation;
+ import org.keycloak.saml.common.exceptions.ParsingException;
+ import org.keycloak.saml.processing.core.parsers.saml.SAMLParser;
+ import org.keycloak.testsuite.Assert;
++import org.keycloak.testsuite.broker.OIDCIdentityProviderConfigRep;
+ import org.keycloak.testsuite.util.AdminEventPaths;
+ import org.w3c.dom.NodeList;
+ 
++import javax.ws.rs.ClientErrorException;
+ import javax.ws.rs.NotFoundException;
+ import javax.ws.rs.core.MediaType;
+ import javax.ws.rs.core.Response;
+@@ -59,6 +66,7 @@
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Set;
++import java.util.UUID;
+ 
+ import static org.hamcrest.Matchers.containsInAnyOrder;
+ import static org.hamcrest.Matchers.containsString;
+@@ -75,6 +83,7 @@
+ import static org.junit.Assert.assertNotNull;
+ import static org.junit.Assert.assertThat;
+ import static org.junit.Assert.assertTrue;
++import static org.keycloak.testsuite.arquillian.AuthServerTestEnricher.AUTH_SERVER_SSL_REQUIRED;
+ 
+ /**
+  * @author <a href="mailto:sthorger@redhat.com">Stian Thorgersen</a>
+@@ -102,6 +111,9 @@ public class IdentityProviderTest extends AbstractAdminTest {
+       + "vOU8TyqfZF5jpv0IcrviLl/DoFrbjByeHR+pu/vClcAOjL/u7oQELuuTfNsBI4tpexUj5G8q/YbEz0gk7idf"
+       + "LXrAUVcsR73oTngrhRfwUSmPrjjK0kjcRb6HL9V/+wh3R/6mEd59U08ExT8N38rhmn0CI3ehMdebReprP7U8=";
+ 
++    @Rule
++    public ExpectedException expectedException = ExpectedException.none();
++
+     @Test
+     public void testFindAll() {
+         create(createRep("google", "google"));
+@@ -143,6 +155,71 @@ public void testCreate() {
+         assertEquals(ComponentRepresentation.SECRET_VALUE, rep.getConfig().get("clientSecret"));
+     }
+ 
++    @Test
++    public void failCreateInvalidUrl() {
++        RealmRepresentation realmRep = realm.toRepresentation();
++
++        realmRep.setSslRequired(SslRequired.ALL.name());
++
++        try {
++            realm.update(realmRep);
++
++            IdentityProviderRepresentation newIdentityProvider = createRep("new-identity-provider", "oidc");
++
++            newIdentityProvider.getConfig().put("clientId", "clientId");
++            newIdentityProvider.getConfig().put("clientSecret", "some secret value");
++
++            OIDCIdentityProviderConfigRep oidcConfig = new OIDCIdentityProviderConfigRep(newIdentityProvider);
++
++            oidcConfig.setAuthorizationUrl("invalid://test");
++
++            try (Response response = this.realm.identityProviders().create(newIdentityProvider)) {
++                assertEquals(AUTH_SERVER_SSL_REQUIRED ? Response.Status.BAD_REQUEST.getStatusCode() :
++                        Response.Status.CREATED.getStatusCode(), response.getStatus());
++            }
++
++            oidcConfig.setAuthorizationUrl(null);
++            oidcConfig.setTokenUrl("http://test");
++
++            try (Response response = this.realm.identityProviders().create(newIdentityProvider)) {
++                assertEquals(AUTH_SERVER_SSL_REQUIRED ? Response.Status.BAD_REQUEST.getStatusCode() :
++                        Response.Status.CREATED.getStatusCode(), response.getStatus());
++            }
++
++            oidcConfig.setAuthorizationUrl(null);
++            oidcConfig.setTokenUrl(null);
++            oidcConfig.setJwksUrl("http://test");
++
++            try (Response response = this.realm.identityProviders().create(newIdentityProvider)) {
++                assertEquals(AUTH_SERVER_SSL_REQUIRED ? Response.Status.BAD_REQUEST.getStatusCode() :
++                        Response.Status.CREATED.getStatusCode(), response.getStatus());
++            }
++
++            oidcConfig.setAuthorizationUrl(null);
++            oidcConfig.setTokenUrl(null);
++            oidcConfig.setJwksUrl(null);
++            oidcConfig.setLogoutUrl("http://test");
++
++            try (Response response = this.realm.identityProviders().create(newIdentityProvider)) {
++                assertEquals(AUTH_SERVER_SSL_REQUIRED ? Response.Status.BAD_REQUEST.getStatusCode() :
++                        Response.Status.CREATED.getStatusCode(), response.getStatus());
++            }
++
++            oidcConfig.setAuthorizationUrl(null);
++            oidcConfig.setTokenUrl(null);
++            oidcConfig.setJwksUrl(null);
++            oidcConfig.setLogoutUrl(null);
++            oidcConfig.setUserInfoUrl("http://test");
++
++            try (Response response = this.realm.identityProviders().create(newIdentityProvider)) {
++                assertEquals(AUTH_SERVER_SSL_REQUIRED ? Response.Status.BAD_REQUEST.getStatusCode() :
++                        Response.Status.CREATED.getStatusCode(), response.getStatus());
++            }
++        } finally {
++            realmRep.setSslRequired(SslRequired.NONE.name());
++            realm.update(realmRep);
++        }
++    }
+ 
+     @Test
+     public void testCreateWithBasicAuth() {
+@@ -258,6 +335,84 @@ public void testUpdate() {
+         assertEquals("${vault.key}", testingClient.testing("admin-client-test").getIdentityProviderConfig("changed-alias").get("clientSecret"));
+     }
+ 
++    @Test
++    public void failUpdateInvalidUrl() {
++        RealmRepresentation realmRep = realm.toRepresentation();
++
++        realmRep.setSslRequired(SslRequired.ALL.name());
++
++        try {
++            realm.update(realmRep);
++
++            IdentityProviderRepresentation representation = createRep(UUID.randomUUID().toString(), "oidc");
++
++            representation.getConfig().put("clientId", "clientId");
++            representation.getConfig().put("clientSecret", "some secret value");
++
++            try (Response response = realm.identityProviders().create(representation)) {
++                assertEquals(Response.Status.CREATED.getStatusCode(), response.getStatus());
++            }
++
++            IdentityProviderResource resource = this.realm.identityProviders().get(representation.getAlias());
++            representation = resource.toRepresentation();
++
++            OIDCIdentityProviderConfigRep oidcConfig = new OIDCIdentityProviderConfigRep(representation);
++
++            oidcConfig.setAuthorizationUrl("invalid://test");
++
++            this.expectedException.expect(
++                    Matchers.allOf(Matchers.instanceOf(ClientErrorException.class), Matchers.hasProperty("response",
++                            Matchers.hasProperty("status", Matchers.is(
++                                    Response.Status.BAD_REQUEST.getStatusCode())))));
++            resource.update(representation);
++
++            oidcConfig.setAuthorizationUrl(null);
++            oidcConfig.setTokenUrl("http://test");
++
++            this.expectedException.expect(
++                    Matchers.allOf(Matchers.instanceOf(ClientErrorException.class), Matchers.hasProperty("response",
++                            Matchers.hasProperty("status", Matchers.is(
++                                    Response.Status.BAD_REQUEST.getStatusCode())))));
++            resource.update(representation);
++
++            oidcConfig.setAuthorizationUrl(null);
++            oidcConfig.setTokenUrl(null);
++            oidcConfig.setJwksUrl("http://test");
++
++            this.expectedException.expect(
++                    Matchers.allOf(Matchers.instanceOf(ClientErrorException.class), Matchers.hasProperty("response",
++                            Matchers.hasProperty("status", Matchers.is(
++                                    Response.Status.BAD_REQUEST.getStatusCode())))));
++            resource.update(representation);
++
++            oidcConfig.setAuthorizationUrl(null);
++            oidcConfig.setTokenUrl(null);
++            oidcConfig.setJwksUrl(null);
++            oidcConfig.setLogoutUrl("http://test");
++
++            this.expectedException.expect(
++                    Matchers.allOf(Matchers.instanceOf(ClientErrorException.class), Matchers.hasProperty("response",
++                            Matchers.hasProperty("status", Matchers.is(
++                                    Response.Status.BAD_REQUEST.getStatusCode())))));
++            resource.update(representation);
++
++            oidcConfig.setAuthorizationUrl(null);
++            oidcConfig.setTokenUrl(null);
++            oidcConfig.setJwksUrl(null);
++            oidcConfig.setLogoutUrl(null);
++            oidcConfig.setUserInfoUrl("http://test");
++
++            this.expectedException.expect(
++                    Matchers.allOf(Matchers.instanceOf(ClientErrorException.class), Matchers.hasProperty("response",
++                            Matchers.hasProperty("status", Matchers.is(
++                                    Response.Status.BAD_REQUEST.getStatusCode())))));
++            resource.update(representation);
++        } finally {
++            realmRep.setSslRequired(SslRequired.NONE.name());
++            realm.update(realmRep);
++        }
++    }
++
+     @Test
+     public void testRemove() {
+         IdentityProviderRepresentation newIdentityProvider = createRep("remove-identity-provider", "saml");
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/PermissionsTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/PermissionsTest.java
+index 732f73f54f6b..f628175db707 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/PermissionsTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/PermissionsTest.java
+@@ -1658,8 +1658,8 @@ public void invoke(RealmResource realm) {
+         }, Resource.IDENTITY_PROVIDER, false);
+         invoke(new InvocationWithResponse() {
+             public void invoke(RealmResource realm, AtomicReference<Response> response) {
+-                response.set(realm.identityProviders().create(IdentityProviderBuilder.create().providerId("nosuch")
+-                        .displayName("nosuch-foo").alias("foo").build()));
++                response.set(realm.identityProviders().create(IdentityProviderBuilder.create().providerId("oidc")
++                        .displayName("nosuch-foo").alias("foo").setAttribute("clientId", "foo").setAttribute("clientSecret", "foo").build()));
+             }
+         }, Resource.IDENTITY_PROVIDER, true);
+ 
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java
+index c8b06720dfac..6d45fb4fe812 100755
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java
+@@ -708,7 +708,7 @@ private void addSampleIdentityProvider() {
+ 
+         IdentityProviderRepresentation rep = new IdentityProviderRepresentation();
+         rep.setAlias("social-provider-id");
+-        rep.setProviderId("social-provider-type");
++        rep.setProviderId("oidc");
+ 
+         realm.identityProviders().create(rep);
+         assertAdminEvents.assertEvent(realmId, OperationType.CREATE, AdminEventPaths.identityProviderPath(rep.getAlias()), rep, ResourceType.IDENTITY_PROVIDER);
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/broker/KcOIDCBrokerWithSignatureTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/broker/KcOIDCBrokerWithSignatureTest.java
+index f98a5fc804ec..34292ee638c5 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/broker/KcOIDCBrokerWithSignatureTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/broker/KcOIDCBrokerWithSignatureTest.java
+@@ -279,7 +279,7 @@ public void testPublicKeyCacheInvalidatedWhenProviderUpdated() throws Exception
+ 
+         // Update identityProvider to some bad JWKS_URL
+         OIDCIdentityProviderConfigRep cfg = new OIDCIdentityProviderConfigRep(idpRep);
+-        cfg.setJwksUrl("http://localhost:43214/non-existent");
++        cfg.setJwksUrl("https://localhost:43214/non-existent");
+         updateIdentityProvider(idpRep);
+ 
+         // Check that key is not cached anymore
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/broker/OIDCIdentityProviderConfigRep.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/broker/OIDCIdentityProviderConfigRep.java
+index da8622fa388f..8d95be7ff735 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/broker/OIDCIdentityProviderConfigRep.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/broker/OIDCIdentityProviderConfigRep.java
+@@ -27,7 +27,7 @@
+  *
+  * @author <a href="mailto:mposolda@redhat.com">Marek Posolda</a>
+  */
+-class OIDCIdentityProviderConfigRep extends OIDCIdentityProviderConfig {
++public class OIDCIdentityProviderConfigRep extends OIDCIdentityProviderConfig {
+ 
+     private final IdentityProviderRepresentation rep;
+ 
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/cli/admin/KcAdmUpdateTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/cli/admin/KcAdmUpdateTest.java
+index c1bebe062cb8..49ff78d1adf6 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/cli/admin/KcAdmUpdateTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/cli/admin/KcAdmUpdateTest.java
+@@ -43,8 +43,8 @@ public void testUpdateIDPWithoutInternalId() throws IOException {
+                 .providerId(SAMLIdentityProviderFactory.PROVIDER_ID)
+                 .alias("idpAlias")
+                 .displayName("SAML")
+-                .setAttribute(SAMLIdentityProviderConfig.SINGLE_SIGN_ON_SERVICE_URL, "http://saml.idp/saml")
+-                .setAttribute(SAMLIdentityProviderConfig.SINGLE_LOGOUT_SERVICE_URL, "http://saml.idp/saml")
++                .setAttribute(SAMLIdentityProviderConfig.SINGLE_SIGN_ON_SERVICE_URL, "https://saml.idp/saml")
++                .setAttribute(SAMLIdentityProviderConfig.SINGLE_LOGOUT_SERVICE_URL, "https://saml.idp/saml")
+                 .setAttribute(SAMLIdentityProviderConfig.NAME_ID_POLICY_FORMAT, "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress")
+                 .setAttribute(SAMLIdentityProviderConfig.POST_BINDING_RESPONSE, "false")
+                 .setAttribute(SAMLIdentityProviderConfig.POST_BINDING_AUTHN_REQUEST, "false")
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/BrokerTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/BrokerTest.java
+index 13ec90c7b934..954d3fc2d44a 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/BrokerTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/BrokerTest.java
+@@ -91,7 +91,7 @@ private SAML2Object createAuthnResponse(SAML2Object so) {
+             final ResponseType res = new SAML2LoginResponseBuilder()
+               .requestID(req.getID())
+               .destination(req.getAssertionConsumerServiceURL().toString())
+-              .issuer("http://saml.idp/saml")
++              .issuer("https://saml.idp/saml")
+               .assertionExpiration(1000000)
+               .subjectExpiration(1000000)
+               .requestIssuer(getAuthServerRealmBase(REALM_NAME).toString())
+@@ -118,7 +118,7 @@ public void testLogoutPropagatesToSamlIdentityProvider() throws IOException {
+ 
+         AuthenticationExecutionInfoRepresentation reviewProfileAuthenticator = null;
+         String firstBrokerLoginFlowAlias = null;
+-        try (IdentityProviderCreator idp = new IdentityProviderCreator(realm, addIdentityProvider("http://saml.idp/saml"))) {
++        try (IdentityProviderCreator idp = new IdentityProviderCreator(realm, addIdentityProvider("https://saml.idp/saml"))) {
+             IdentityProviderRepresentation idpRepresentation = idp.identityProvider().toRepresentation();
+             firstBrokerLoginFlowAlias = idpRepresentation.getFirstBrokerLoginFlowAlias();
+             List<AuthenticationExecutionInfoRepresentation> executions = realm.flows().getExecutions(firstBrokerLoginFlowAlias);
+@@ -168,7 +168,7 @@ public void testLogoutPropagatesToSamlIdentityProvider() throws IOException {
+     public void testRedirectQueryParametersPreserved() throws IOException {
+         final RealmResource realm = adminClient.realm(REALM_NAME);
+ 
+-        try (IdentityProviderCreator idp = new IdentityProviderCreator(realm, addIdentityProvider("http://saml.idp/?service=name&serviceType=prod"))) {
++        try (IdentityProviderCreator idp = new IdentityProviderCreator(realm, addIdentityProvider("https://saml.idp/?service=name&serviceType=prod"))) {
+             SAMLDocumentHolder samlResponse = new SamlClientBuilder()
+               .authnRequest(getAuthServerSamlEndpoint(REALM_NAME), SAML_CLIENT_ID_SALES_POST, SAML_ASSERTION_CONSUMER_URL_SALES_POST, POST).build()
+               .login().idp(SAML_BROKER_ALIAS).build()
+@@ -178,7 +178,7 @@ public void testRedirectQueryParametersPreserved() throws IOException {
+ 
+             assertThat(samlResponse.getSamlObject(), Matchers.instanceOf(AuthnRequestType.class));
+             AuthnRequestType ar = (AuthnRequestType) samlResponse.getSamlObject();
+-            assertThat(ar.getDestination(), Matchers.equalTo(URI.create("http://saml.idp/?service=name&serviceType=prod")));
++            assertThat(ar.getDestination(), Matchers.equalTo(URI.create("https://saml.idp/?service=name&serviceType=prod")));
+ 
+             Header[] headers = new SamlClientBuilder()
+               .authnRequest(getAuthServerSamlEndpoint(REALM_NAME), SAML_CLIENT_ID_SALES_POST, SAML_ASSERTION_CONSUMER_URL_SALES_POST, POST).build()
+@@ -187,7 +187,7 @@ public void testRedirectQueryParametersPreserved() throws IOException {
+               .executeAndTransform(resp -> resp.getHeaders(HttpHeaders.LOCATION));
+ 
+             assertThat(headers.length, Matchers.is(1));
+-            assertThat(headers[0].getValue(), Matchers.containsString("http://saml.idp/?service=name&serviceType=prod"));
++            assertThat(headers[0].getValue(), Matchers.containsString("https://saml.idp/?service=name&serviceType=prod"));
+             assertThat(headers[0].getValue(), Matchers.containsString("SAMLRequest"));
+         }
+     }
+@@ -228,7 +228,7 @@ public void testExpiredAssertionShouldFail() throws Exception {
+     private void assertExpired(XMLGregorianCalendar notBefore, XMLGregorianCalendar notOnOrAfter, boolean shouldPass) throws Exception {
+         Status expectedStatus = shouldPass ? Status.OK : Status.BAD_REQUEST;
+         final RealmResource realm = adminClient.realm(REALM_NAME);
+-        try (IdentityProviderCreator idp = new IdentityProviderCreator(realm, addIdentityProvider("http://saml.idp/"))) {
++        try (IdentityProviderCreator idp = new IdentityProviderCreator(realm, addIdentityProvider("https://saml.idp/"))) {
+             new SamlClientBuilder()
+               .authnRequest(getAuthServerSamlEndpoint(REALM_NAME), SAML_CLIENT_ID_SALES_POST, SAML_ASSERTION_CONSUMER_URL_SALES_POST, POST).build()
+               .login().idp(SAML_BROKER_ALIAS).build()
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/IdpInitiatedLoginTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/IdpInitiatedLoginTest.java
+index 37f8ae3d15d5..cddd3a8a1a8c 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/IdpInitiatedLoginTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/IdpInitiatedLoginTest.java
+@@ -210,7 +210,7 @@ public void testSamlPostBindingPageIdP() throws Exception {
+                 IdentityProviderBuilder.create()
+                     .alias("saml-idp")
+                     .providerId("saml")
+-                    .setAttribute(SAMLIdentityProviderConfig.SINGLE_SIGN_ON_SERVICE_URL, "http://saml-idp-sso-service/")
++                    .setAttribute(SAMLIdentityProviderConfig.SINGLE_SIGN_ON_SERVICE_URL, "https://saml-idp-sso-service/")
+                     .setAttribute(SAMLIdentityProviderConfig.POST_BINDING_AUTHN_REQUEST, "true")
+                     .build())) {
+             new SamlClientBuilder()
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/LogoutTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/LogoutTest.java
+index e1fa36fc356d..8dbae0fd8b35 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/LogoutTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/saml/LogoutTest.java
+@@ -75,9 +75,9 @@ public class LogoutTest extends AbstractSamlTest {
+     private static final String SP_NAME_QUALIFIER = "spNameQualifier";
+     private static final String NAME_QUALIFIER = "nameQualifier";
+ 
+-    private static final String BROKER_SIGN_ON_SERVICE_URL = "http://saml.idp/saml";
+-    private static final String BROKER_LOGOUT_SERVICE_URL = "http://saml.idp/SLO/saml";
+-    private static final String BROKER_SERVICE_ID = "http://saml.idp/saml";
++    private static final String BROKER_SIGN_ON_SERVICE_URL = "https://saml.idp/saml";
++    private static final String BROKER_LOGOUT_SERVICE_URL = "https://saml.idp/SLO/saml";
++    private static final String BROKER_SERVICE_ID = "https://saml.idp/saml";
+ 
+     private ClientRepresentation salesRep;
+     private ClientRepresentation sales2Rep;
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/resources/cli/idp-keycloak-9167.json b/testsuite/integration-arquillian/tests/base/src/test/resources/cli/idp-keycloak-9167.json
+index 58fd177e0304..79c23c098263 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/resources/cli/idp-keycloak-9167.json
++++ b/testsuite/integration-arquillian/tests/base/src/test/resources/cli/idp-keycloak-9167.json
+@@ -13,9 +13,9 @@
+   "config" : {
+     "nameIDPolicyFormat" : "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress",
+     "postBindingResponse" : "false",
+-    "singleLogoutServiceUrl" : "http://saml.idp/saml",
++    "singleLogoutServiceUrl" : "https://saml.idp/saml",
+     "postBindingAuthnRequest" : "false",
+-    "singleSignOnServiceUrl" : "http://saml.idp/saml",
++    "singleSignOnServiceUrl" : "https://saml.idp/saml",
+     "backchannelSupported" : "false"
+   }
+ }

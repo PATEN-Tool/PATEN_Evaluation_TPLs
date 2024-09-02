@@ -1,0 +1,13 @@
+diff --git a/velocity-tools-view/src/main/java/org/apache/velocity/tools/view/VelocityViewServlet.java b/velocity-tools-view/src/main/java/org/apache/velocity/tools/view/VelocityViewServlet.java
+index aff9b71d7..325ab0bba 100644
+--- a/velocity-tools-view/src/main/java/org/apache/velocity/tools/view/VelocityViewServlet.java
++++ b/velocity-tools-view/src/main/java/org/apache/velocity/tools/view/VelocityViewServlet.java
+@@ -460,7 +460,7 @@ protected void error(HttpServletRequest request,
+             html.append("<head><title>Error</title></head>\n");
+             html.append("<body>\n");
+             html.append("<h2>VelocityView : Error processing a template for path '");
+-            html.append(path);
++            html.append(StringEscapeUtils.escapeHtml4(path));
+             html.append("'</h2>\n");
+ 
+             Throwable cause = e;

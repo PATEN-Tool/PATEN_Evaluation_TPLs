@@ -1,0 +1,1572 @@
+diff --git a/nifi-bootstrap/src/main/java/org/apache/nifi/bootstrap/NotificationServiceManager.java b/nifi-bootstrap/src/main/java/org/apache/nifi/bootstrap/NotificationServiceManager.java
+index 6e2fa35a4e34..757d259e4f51 100644
+--- a/nifi-bootstrap/src/main/java/org/apache/nifi/bootstrap/NotificationServiceManager.java
++++ b/nifi-bootstrap/src/main/java/org/apache/nifi/bootstrap/NotificationServiceManager.java
+@@ -16,7 +16,25 @@
+  */
+ package org.apache.nifi.bootstrap;
+ 
+-import org.apache.nifi.parameter.ParameterLookup;
++import java.io.BufferedInputStream;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.util.ArrayList;
++import java.util.Collection;
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.List;
++import java.util.Map;
++import java.util.concurrent.Executors;
++import java.util.concurrent.ScheduledExecutorService;
++import java.util.concurrent.ThreadFactory;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.DocumentBuilderFactory;
++import javax.xml.parsers.ParserConfigurationException;
+ import org.apache.nifi.attribute.expression.language.StandardPropertyValue;
+ import org.apache.nifi.bootstrap.notification.NotificationContext;
+ import org.apache.nifi.bootstrap.notification.NotificationInitializationContext;
+@@ -27,6 +45,7 @@
+ import org.apache.nifi.components.PropertyValue;
+ import org.apache.nifi.components.ValidationContext;
+ import org.apache.nifi.components.ValidationResult;
++import org.apache.nifi.parameter.ParameterLookup;
+ import org.apache.nifi.registry.VariableRegistry;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+@@ -37,26 +56,6 @@
+ import org.xml.sax.InputSource;
+ import org.xml.sax.SAXException;
+ 
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import java.io.BufferedInputStream;
+-import java.io.File;
+-import java.io.FileInputStream;
+-import java.io.IOException;
+-import java.io.InputStream;
+-import java.util.ArrayList;
+-import java.util.Collection;
+-import java.util.Collections;
+-import java.util.HashMap;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.concurrent.Executors;
+-import java.util.concurrent.ScheduledExecutorService;
+-import java.util.concurrent.ThreadFactory;
+-import java.util.concurrent.TimeUnit;
+-import java.util.concurrent.atomic.AtomicInteger;
+-
+ public class NotificationServiceManager {
+     private static final Logger logger = LoggerFactory.getLogger(NotificationServiceManager.class);
+     private final Map<String, ConfiguredNotificationService> servicesById = new HashMap<>();
+@@ -88,6 +87,27 @@ public void setMaxNotificationAttempts(final int maxAttempts) {
+         this.maxAttempts = maxAttempts;
+     }
+ 
++    private static DocumentBuilder createSafeDocumentBuilder() throws ParserConfigurationException {
++        final DocumentBuilderFactory docFactory = DocumentBuilderFactory.newInstance();
++        docFactory.setNamespaceAware(false);
++
++        // These features are used to disable processing external entities in the DocumentBuilderFactory to protect against XXE attacks
++        final String DISALLOW_DOCTYPES = "http://apache.org/xml/features/disallow-doctype-decl";
++        final String ALLOW_EXTERNAL_GENERAL_ENTITIES = "http://xml.org/sax/features/external-general-entities";
++        final String ALLOW_EXTERNAL_PARAM_ENTITIES = "http://xml.org/sax/features/external-parameter-entities";
++        final String ALLOW_EXTERNAL_DTD = "http://apache.org/xml/features/nonvalidating/load-external-dtd";
++
++        // Disable DTDs and external entities to protect against XXE
++        docFactory.setAttribute(DISALLOW_DOCTYPES, true);
++        docFactory.setAttribute(ALLOW_EXTERNAL_DTD, false);
++        docFactory.setAttribute(ALLOW_EXTERNAL_GENERAL_ENTITIES, false);
++        docFactory.setAttribute(ALLOW_EXTERNAL_PARAM_ENTITIES, false);
++        docFactory.setXIncludeAware(false);
++        docFactory.setExpandEntityReferences(false);
++
++        return docFactory.newDocumentBuilder();
++    }
++
+     /**
+      * Loads the Notification Services from the given XML configuration file.
+      *
+@@ -123,9 +143,7 @@ public void setMaxNotificationAttempts(final int maxAttempts) {
+      * @throws SAXException if unable to parse the given file properly
+      */
+     public void loadNotificationServices(final File servicesFile) throws IOException, ParserConfigurationException, SAXException {
+-        final DocumentBuilderFactory docBuilderFactory = DocumentBuilderFactory.newInstance();
+-        docBuilderFactory.setNamespaceAware(false);
+-        final DocumentBuilder docBuilder = docBuilderFactory.newDocumentBuilder();
++        final DocumentBuilder docBuilder = createSafeDocumentBuilder();
+ 
+         final Map<String, ConfiguredNotificationService> serviceMap = new HashMap<>();
+         try (final InputStream fis = new FileInputStream(servicesFile);
+diff --git a/nifi-commons/nifi-security-utils/src/main/java/org/apache/nifi/security/xml/XmlUtils.java b/nifi-commons/nifi-security-utils/src/main/java/org/apache/nifi/security/xml/XmlUtils.java
+index e384c5b30a43..0066806b7c5e 100644
+--- a/nifi-commons/nifi-security-utils/src/main/java/org/apache/nifi/security/xml/XmlUtils.java
++++ b/nifi-commons/nifi-security-utils/src/main/java/org/apache/nifi/security/xml/XmlUtils.java
+@@ -17,6 +17,8 @@
+ package org.apache.nifi.security.xml;
+ 
+ import java.io.InputStream;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.DocumentBuilderFactory;
+ import javax.xml.parsers.ParserConfigurationException;
+ import javax.xml.parsers.SAXParser;
+ import javax.xml.parsers.SAXParserFactory;
+@@ -24,12 +26,19 @@
+ import javax.xml.stream.XMLStreamException;
+ import javax.xml.stream.XMLStreamReader;
+ import javax.xml.transform.stream.StreamSource;
++import javax.xml.validation.Schema;
+ import org.xml.sax.ContentHandler;
+ import org.xml.sax.SAXException;
+ import org.xml.sax.XMLReader;
+ 
+ public class XmlUtils {
+ 
++    // These features are used to disable processing external entities in the DocumentBuilderFactory to protect against XXE attacks
++    private static final String DISALLOW_DOCTYPES = "http://apache.org/xml/features/disallow-doctype-decl";
++    private static final String ALLOW_EXTERNAL_GENERAL_ENTITIES = "http://xml.org/sax/features/external-general-entities";
++    private static final String ALLOW_EXTERNAL_PARAM_ENTITIES = "http://xml.org/sax/features/external-parameter-entities";
++    private static final String ALLOW_EXTERNAL_DTD = "http://apache.org/xml/features/nonvalidating/load-external-dtd";
++
+     public static XMLStreamReader createSafeReader(InputStream inputStream) throws XMLStreamException {
+         if (inputStream == null) {
+             throw new IllegalArgumentException("The provided input stream cannot be null");
+@@ -57,13 +66,37 @@ public static XMLReader createSafeSaxReader(SAXParserFactory saxParserFactory, C
+             throw new IllegalArgumentException("The provided SAX content handler cannot be null");
+         }
+ 
+-        saxParserFactory.setFeature("http://xml.org/sax/features/external-general-entities", false);
+-        saxParserFactory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+-
+         SAXParser saxParser = saxParserFactory.newSAXParser();
+         XMLReader xmlReader = saxParser.getXMLReader();
++        xmlReader.setFeature(DISALLOW_DOCTYPES, true);
++        xmlReader.setFeature(ALLOW_EXTERNAL_GENERAL_ENTITIES, false);
++        xmlReader.setFeature(ALLOW_EXTERNAL_PARAM_ENTITIES, false);
+         xmlReader.setContentHandler(contentHandler);
+ 
+         return xmlReader;
+     }
++
++    public static DocumentBuilder createSafeDocumentBuilder(Schema schema, boolean isNamespaceAware) throws ParserConfigurationException {
++        final DocumentBuilderFactory docFactory = DocumentBuilderFactory.newInstance();
++        docFactory.setSchema(schema);
++        docFactory.setNamespaceAware(isNamespaceAware);
++
++        // Disable DTDs and external entities to protect against XXE
++        docFactory.setAttribute(DISALLOW_DOCTYPES, true);
++        docFactory.setAttribute(ALLOW_EXTERNAL_DTD, false);
++        docFactory.setAttribute(ALLOW_EXTERNAL_GENERAL_ENTITIES, false);
++        docFactory.setAttribute(ALLOW_EXTERNAL_PARAM_ENTITIES, false);
++        docFactory.setXIncludeAware(false);
++        docFactory.setExpandEntityReferences(false);
++
++        return docFactory.newDocumentBuilder();
++    }
++
++    public static DocumentBuilder createSafeDocumentBuilder(Schema schema) throws ParserConfigurationException {
++        return createSafeDocumentBuilder(schema, true);
++    }
++
++    public static DocumentBuilder createSafeDocumentBuilder(boolean isNamespaceAware) throws ParserConfigurationException {
++        return createSafeDocumentBuilder(null, isNamespaceAware);
++    }
+ }
+diff --git a/nifi-commons/nifi-security-utils/src/test/groovy/org/apache/nifi/security/xml/XmlUtilsTest.groovy b/nifi-commons/nifi-security-utils/src/test/groovy/org/apache/nifi/security/xml/XmlUtilsTest.groovy
+index 87429fc44c1f..99c7684f7431 100644
+--- a/nifi-commons/nifi-security-utils/src/test/groovy/org/apache/nifi/security/xml/XmlUtilsTest.groovy
++++ b/nifi-commons/nifi-security-utils/src/test/groovy/org/apache/nifi/security/xml/XmlUtilsTest.groovy
+@@ -24,6 +24,7 @@ import org.junit.runner.RunWith
+ import org.junit.runners.JUnit4
+ import org.slf4j.Logger
+ import org.slf4j.LoggerFactory
++import org.xml.sax.SAXParseException
+ 
+ import javax.xml.bind.JAXBContext
+ import javax.xml.bind.UnmarshalException
+@@ -32,6 +33,7 @@ import javax.xml.bind.annotation.XmlAccessType
+ import javax.xml.bind.annotation.XmlAccessorType
+ import javax.xml.bind.annotation.XmlAttribute
+ import javax.xml.bind.annotation.XmlRootElement
++import javax.xml.parsers.DocumentBuilder
+ import javax.xml.stream.XMLStreamReader
+ 
+ import static groovy.test.GroovyAssert.shouldFail
+@@ -77,9 +79,26 @@ class XmlUtilsTest {
+         logger.expected(msg)
+         assert msg =~ "XMLStreamException: ParseError "
+     }
++
++    @Test
++    void testShouldHandleXXEInDocumentBuilder() {
++        // Arrange
++        final String XXE_TEMPLATE_FILEPATH = "src/test/resources/local_xxe_file.xml"
++        DocumentBuilder documentBuilder = XmlUtils.createSafeDocumentBuilder(null)
++
++        // Act
++        def msg = shouldFail(SAXParseException) {
++            def parsedFlow = documentBuilder.parse(new File(XXE_TEMPLATE_FILEPATH))
++            logger.info("Parsed ${parsedFlow.toString()}")
++        }
++
++        // Assert
++        logger.expected(msg)
++        assert msg =~ "SAXParseException.* DOCTYPE is disallowed when the feature"
++    }
+ }
+ 
+-@XmlAccessorType( XmlAccessType.NONE )
++@XmlAccessorType(XmlAccessType.NONE)
+ @XmlRootElement(name = "object")
+ class XmlObject {
+     @XmlAttribute
+diff --git a/nifi-framework-api/pom.xml b/nifi-framework-api/pom.xml
+index 8fa92d555b83..665aca4a7650 100644
+--- a/nifi-framework-api/pom.xml
++++ b/nifi-framework-api/pom.xml
+@@ -29,5 +29,11 @@
+             <artifactId>nifi-api</artifactId>
+             <version>1.12.0-SNAPSHOT</version>
+         </dependency>
++        <dependency>
++            <groupId>org.apache.nifi</groupId>
++            <artifactId>nifi-security-utils</artifactId>
++            <version>1.12.0-SNAPSHOT</version>
++            <scope>provided</scope>
++        </dependency>
+     </dependencies>
+ </project>
+diff --git a/nifi-framework-api/src/main/java/org/apache/nifi/authorization/AbstractPolicyBasedAuthorizer.java b/nifi-framework-api/src/main/java/org/apache/nifi/authorization/AbstractPolicyBasedAuthorizer.java
+index 750071705303..a2d55e60d866 100644
+--- a/nifi-framework-api/src/main/java/org/apache/nifi/authorization/AbstractPolicyBasedAuthorizer.java
++++ b/nifi-framework-api/src/main/java/org/apache/nifi/authorization/AbstractPolicyBasedAuthorizer.java
+@@ -16,10 +16,25 @@
+  */
+ package org.apache.nifi.authorization;
+ 
++import java.io.ByteArrayInputStream;
++import java.io.IOException;
++import java.io.StringWriter;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Comparator;
++import java.util.List;
++import java.util.Set;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.stream.XMLOutputFactory;
++import javax.xml.stream.XMLStreamException;
++import javax.xml.stream.XMLStreamWriter;
+ import org.apache.nifi.authorization.exception.AuthorizationAccessException;
+ import org.apache.nifi.authorization.exception.AuthorizerCreationException;
+ import org.apache.nifi.authorization.exception.AuthorizerDestructionException;
+ import org.apache.nifi.authorization.exception.UninheritableAuthorizationsException;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ import org.w3c.dom.Document;
+@@ -28,29 +43,12 @@
+ import org.w3c.dom.NodeList;
+ import org.xml.sax.SAXException;
+ 
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.stream.XMLOutputFactory;
+-import javax.xml.stream.XMLStreamException;
+-import javax.xml.stream.XMLStreamWriter;
+-import java.io.ByteArrayInputStream;
+-import java.io.IOException;
+-import java.io.StringWriter;
+-import java.nio.charset.StandardCharsets;
+-import java.util.ArrayList;
+-import java.util.Collections;
+-import java.util.Comparator;
+-import java.util.List;
+-import java.util.Set;
+-
+ /**
+  * An Authorizer that provides management of users, groups, and policies.
+  */
+ public abstract class AbstractPolicyBasedAuthorizer implements ManagedAuthorizer {
+     private static final Logger logger = LoggerFactory.getLogger(AbstractPolicyBasedAuthorizer.class);
+ 
+-    static final DocumentBuilderFactory DOCUMENT_BUILDER_FACTORY = DocumentBuilderFactory.newInstance();
+     static final XMLOutputFactory XML_OUTPUT_FACTORY = XMLOutputFactory.newInstance();
+ 
+     static final String USER_ELEMENT = "user";
+@@ -415,7 +413,7 @@ private PoliciesUsersAndGroups parsePoliciesUsersAndGroups(final String fingerpr
+ 
+         final byte[] fingerprintBytes = fingerprint.getBytes(StandardCharsets.UTF_8);
+         try (final ByteArrayInputStream in = new ByteArrayInputStream(fingerprintBytes)) {
+-            final DocumentBuilder docBuilder = DOCUMENT_BUILDER_FACTORY.newDocumentBuilder();
++            final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(null);
+             final Document document = docBuilder.parse(in);
+             final Element rootElement = document.getDocumentElement();
+ 
+diff --git a/nifi-nar-bundles/nifi-evtx-bundle/nifi-evtx-processors/src/test/java/org/apache/nifi/processors/evtx/ParseEvtxTest.java b/nifi-nar-bundles/nifi-evtx-bundle/nifi-evtx-processors/src/test/java/org/apache/nifi/processors/evtx/ParseEvtxTest.java
+index e694bda6110c..80c309bfc8b2 100644
+--- a/nifi-nar-bundles/nifi-evtx-bundle/nifi-evtx-processors/src/test/java/org/apache/nifi/processors/evtx/ParseEvtxTest.java
++++ b/nifi-nar-bundles/nifi-evtx-bundle/nifi-evtx-processors/src/test/java/org/apache/nifi/processors/evtx/ParseEvtxTest.java
+@@ -17,6 +17,30 @@
+ 
+ package org.apache.nifi.processors.evtx;
+ 
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertTrue;
++import static org.mockito.Mockito.any;
++import static org.mockito.Mockito.anyString;
++import static org.mockito.Mockito.eq;
++import static org.mockito.Mockito.isA;
++import static org.mockito.Mockito.mock;
++import static org.mockito.Mockito.verify;
++import static org.mockito.Mockito.verifyNoMoreInteractions;
++import static org.mockito.Mockito.when;
++
++import java.io.ByteArrayInputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.util.Arrays;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.atomic.AtomicReference;
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.stream.XMLStreamException;
+ import org.apache.nifi.flowfile.FlowFile;
+ import org.apache.nifi.flowfile.attributes.CoreAttributes;
+ import org.apache.nifi.logging.ComponentLog;
+@@ -28,6 +52,7 @@
+ import org.apache.nifi.processors.evtx.parser.MalformedChunkException;
+ import org.apache.nifi.processors.evtx.parser.Record;
+ import org.apache.nifi.processors.evtx.parser.bxml.RootNode;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.apache.nifi.util.MockFlowFile;
+ import org.apache.nifi.util.TestRunner;
+ import org.apache.nifi.util.TestRunners;
+@@ -42,35 +67,8 @@
+ import org.w3c.dom.NodeList;
+ import org.xml.sax.SAXException;
+ 
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.stream.XMLStreamException;
+-import java.io.ByteArrayInputStream;
+-import java.io.IOException;
+-import java.io.InputStream;
+-import java.io.OutputStream;
+-import java.util.Arrays;
+-import java.util.HashMap;
+-import java.util.HashSet;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.Set;
+-import java.util.concurrent.atomic.AtomicReference;
+-
+-import static org.junit.Assert.assertEquals;
+-import static org.junit.Assert.assertTrue;
+-import static org.mockito.Mockito.any;
+-import static org.mockito.Mockito.anyString;
+-import static org.mockito.Mockito.eq;
+-import static org.mockito.Mockito.isA;
+-import static org.mockito.Mockito.mock;
+-import static org.mockito.Mockito.verify;
+-import static org.mockito.Mockito.verifyNoMoreInteractions;
+-import static org.mockito.Mockito.when;
+-
+ @RunWith(MockitoJUnitRunner.class)
+ public class ParseEvtxTest {
+-    public static final DocumentBuilderFactory DOCUMENT_BUILDER_FACTORY = DocumentBuilderFactory.newInstance();
+     public static final String USER_DATA = "UserData";
+     public static final String EVENT_DATA = "EventData";
+     public static final Set DATA_TAGS = new HashSet<>(Arrays.asList(EVENT_DATA, USER_DATA));
+@@ -477,7 +475,7 @@ private int validateFlowFiles(List<MockFlowFile> successFlowFiles) throws SAXExc
+         int totalSize = 0;
+         for (MockFlowFile successFlowFile : successFlowFiles) {
+             // Verify valid XML output
+-            Document document = DOCUMENT_BUILDER_FACTORY.newDocumentBuilder().parse(new ByteArrayInputStream(successFlowFile.toByteArray()));
++            Document document = XmlUtils.createSafeDocumentBuilder(false).parse(new ByteArrayInputStream(successFlowFile.toByteArray()));
+             Element documentElement = document.getDocumentElement();
+             assertEquals(XmlRootNodeHandler.EVENTS, documentElement.getTagName());
+             NodeList eventNodes = documentElement.getChildNodes();
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-documentation/src/test/java/org/apache/nifi/documentation/html/XmlValidator.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-documentation/src/test/java/org/apache/nifi/documentation/html/XmlValidator.java
+index 8481536c90db..4cc6b225892c 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-documentation/src/test/java/org/apache/nifi/documentation/html/XmlValidator.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-documentation/src/test/java/org/apache/nifi/documentation/html/XmlValidator.java
+@@ -18,10 +18,8 @@
+ 
+ import java.io.IOException;
+ import java.io.StringReader;
+-
+ import javax.xml.parsers.DocumentBuilderFactory;
+ import javax.xml.parsers.ParserConfigurationException;
+-
+ import org.junit.Assert;
+ import org.xml.sax.InputSource;
+ import org.xml.sax.SAXException;
+@@ -33,6 +31,14 @@
+  */
+ public class XmlValidator {
+ 
++    /**
++     * Asserts a failure if the provided XML is not valid. <strong>This method does
++     * not use the "safe" {@link DocumentBuilderFactory} from
++     * {@code XmlUtils#createSafeDocumentBuilder(Schema, boolean)} because it checks
++     * generated documentation which contains a doctype. </strong>
++     *
++     * @param xml the XML to validate
++     */
+     public static void assertXmlValid(String xml) {
+         try {
+             final DocumentBuilderFactory dbf = DocumentBuilderFactory.newInstance();
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FileAccessPolicyProvider.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FileAccessPolicyProvider.java
+index 8064d94d60fc..0ea81be241fe 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FileAccessPolicyProvider.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FileAccessPolicyProvider.java
+@@ -16,6 +16,40 @@
+  */
+ package org.apache.nifi.authorization;
+ 
++import java.io.ByteArrayInputStream;
++import java.io.File;
++import java.io.IOException;
++import java.io.StringWriter;
++import java.nio.charset.StandardCharsets;
++import java.text.DateFormat;
++import java.text.SimpleDateFormat;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Comparator;
++import java.util.Date;
++import java.util.HashSet;
++import java.util.Iterator;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++import javax.xml.XMLConstants;
++import javax.xml.bind.JAXBContext;
++import javax.xml.bind.JAXBElement;
++import javax.xml.bind.JAXBException;
++import javax.xml.bind.Marshaller;
++import javax.xml.bind.Unmarshaller;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.stream.XMLOutputFactory;
++import javax.xml.stream.XMLStreamException;
++import javax.xml.stream.XMLStreamReader;
++import javax.xml.stream.XMLStreamWriter;
++import javax.xml.transform.stream.StreamSource;
++import javax.xml.validation.Schema;
++import javax.xml.validation.SchemaFactory;
+ import org.apache.commons.lang3.StringUtils;
+ import org.apache.nifi.authorization.annotation.AuthorizerContext;
+ import org.apache.nifi.authorization.exception.AuthorizationAccessException;
+@@ -43,42 +77,6 @@
+ import org.w3c.dom.NodeList;
+ import org.xml.sax.SAXException;
+ 
+-import javax.xml.XMLConstants;
+-import javax.xml.bind.JAXBContext;
+-import javax.xml.bind.JAXBElement;
+-import javax.xml.bind.JAXBException;
+-import javax.xml.bind.Marshaller;
+-import javax.xml.bind.Unmarshaller;
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.stream.XMLOutputFactory;
+-import javax.xml.stream.XMLStreamException;
+-import javax.xml.stream.XMLStreamReader;
+-import javax.xml.stream.XMLStreamWriter;
+-import javax.xml.transform.stream.StreamSource;
+-import javax.xml.validation.Schema;
+-import javax.xml.validation.SchemaFactory;
+-import java.io.ByteArrayInputStream;
+-import java.io.File;
+-import java.io.IOException;
+-import java.io.StringWriter;
+-import java.nio.charset.StandardCharsets;
+-import java.text.DateFormat;
+-import java.text.SimpleDateFormat;
+-import java.util.ArrayList;
+-import java.util.Collections;
+-import java.util.Comparator;
+-import java.util.Date;
+-import java.util.HashSet;
+-import java.util.Iterator;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.Set;
+-import java.util.concurrent.atomic.AtomicReference;
+-import java.util.regex.Matcher;
+-import java.util.regex.Pattern;
+-
+ public class FileAccessPolicyProvider implements ConfigurableAccessPolicyProvider {
+ 
+     private static final Logger logger = LoggerFactory.getLogger(FileAccessPolicyProvider.class);
+@@ -103,7 +101,6 @@ private static JAXBContext initializeJaxbContext(final String contextPath) {
+         }
+     }
+ 
+-    private static final DocumentBuilderFactory DOCUMENT_BUILDER_FACTORY = DocumentBuilderFactory.newInstance();
+     private static final XMLOutputFactory XML_OUTPUT_FACTORY = XMLOutputFactory.newInstance();
+ 
+     private static final String POLICY_ELEMENT = "policy";
+@@ -501,7 +498,7 @@ private List<AccessPolicy> parsePolicies(final String fingerprint) {
+ 
+         final byte[] fingerprintBytes = fingerprint.getBytes(StandardCharsets.UTF_8);
+         try (final ByteArrayInputStream in = new ByteArrayInputStream(fingerprintBytes)) {
+-            final DocumentBuilder docBuilder = DOCUMENT_BUILDER_FACTORY.newDocumentBuilder();
++            final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(false);
+             final Document document = docBuilder.parse(in);
+             final Element rootElement = document.getDocumentElement();
+ 
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FileUserGroupProvider.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FileUserGroupProvider.java
+index 649244929cee..b184ead07dcd 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FileUserGroupProvider.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FileUserGroupProvider.java
+@@ -16,6 +16,40 @@
+  */
+ package org.apache.nifi.authorization;
+ 
++import java.io.ByteArrayInputStream;
++import java.io.File;
++import java.io.IOException;
++import java.io.StringWriter;
++import java.nio.charset.StandardCharsets;
++import java.text.DateFormat;
++import java.text.SimpleDateFormat;
++import java.util.ArrayList;
++import java.util.Collections;
++import java.util.Comparator;
++import java.util.Date;
++import java.util.HashSet;
++import java.util.Iterator;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.concurrent.atomic.AtomicReference;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
++import javax.xml.XMLConstants;
++import javax.xml.bind.JAXBContext;
++import javax.xml.bind.JAXBElement;
++import javax.xml.bind.JAXBException;
++import javax.xml.bind.Marshaller;
++import javax.xml.bind.Unmarshaller;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.stream.XMLOutputFactory;
++import javax.xml.stream.XMLStreamException;
++import javax.xml.stream.XMLStreamReader;
++import javax.xml.stream.XMLStreamWriter;
++import javax.xml.transform.stream.StreamSource;
++import javax.xml.validation.Schema;
++import javax.xml.validation.SchemaFactory;
+ import org.apache.commons.lang3.StringUtils;
+ import org.apache.nifi.authorization.annotation.AuthorizerContext;
+ import org.apache.nifi.authorization.exception.AuthorizationAccessException;
+@@ -39,42 +73,6 @@
+ import org.w3c.dom.NodeList;
+ import org.xml.sax.SAXException;
+ 
+-import javax.xml.XMLConstants;
+-import javax.xml.bind.JAXBContext;
+-import javax.xml.bind.JAXBElement;
+-import javax.xml.bind.JAXBException;
+-import javax.xml.bind.Marshaller;
+-import javax.xml.bind.Unmarshaller;
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.stream.XMLOutputFactory;
+-import javax.xml.stream.XMLStreamException;
+-import javax.xml.stream.XMLStreamReader;
+-import javax.xml.stream.XMLStreamWriter;
+-import javax.xml.transform.stream.StreamSource;
+-import javax.xml.validation.Schema;
+-import javax.xml.validation.SchemaFactory;
+-import java.io.ByteArrayInputStream;
+-import java.io.File;
+-import java.io.IOException;
+-import java.io.StringWriter;
+-import java.nio.charset.StandardCharsets;
+-import java.text.DateFormat;
+-import java.text.SimpleDateFormat;
+-import java.util.ArrayList;
+-import java.util.Collections;
+-import java.util.Comparator;
+-import java.util.Date;
+-import java.util.HashSet;
+-import java.util.Iterator;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.Set;
+-import java.util.concurrent.atomic.AtomicReference;
+-import java.util.regex.Matcher;
+-import java.util.regex.Pattern;
+-
+ public class FileUserGroupProvider implements ConfigurableUserGroupProvider {
+ 
+     private static final Logger logger = LoggerFactory.getLogger(FileUserGroupProvider.class);
+@@ -99,7 +97,6 @@ private static JAXBContext initializeJaxbContext(final String contextPath) {
+         }
+     }
+ 
+-    private static final DocumentBuilderFactory DOCUMENT_BUILDER_FACTORY = DocumentBuilderFactory.newInstance();
+     private static final XMLOutputFactory XML_OUTPUT_FACTORY = XMLOutputFactory.newInstance();
+ 
+     private static final String USER_ELEMENT = "user";
+@@ -591,7 +588,7 @@ private UsersAndGroups parseUsersAndGroups(final String fingerprint) {
+ 
+         final byte[] fingerprintBytes = fingerprint.getBytes(StandardCharsets.UTF_8);
+         try (final ByteArrayInputStream in = new ByteArrayInputStream(fingerprintBytes)) {
+-            final DocumentBuilder docBuilder = DOCUMENT_BUILDER_FACTORY.newDocumentBuilder();
++            final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(false);
+             final Document document = docBuilder.parse(in);
+             final Element rootElement = document.getDocumentElement();
+ 
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FlowParser.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FlowParser.java
+index 22328569bb33..b5ca365a298a 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FlowParser.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/main/java/org/apache/nifi/authorization/FlowParser.java
+@@ -16,8 +16,24 @@
+  */
+ package org.apache.nifi.authorization;
+ 
++import java.io.ByteArrayInputStream;
++import java.io.File;
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.nio.file.StandardOpenOption;
++import java.util.ArrayList;
++import java.util.List;
++import java.util.zip.GZIPInputStream;
++import javax.xml.XMLConstants;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.validation.Schema;
++import javax.xml.validation.SchemaFactory;
+ import org.apache.commons.io.IOUtils;
+ import org.apache.nifi.controller.serialization.FlowFromDOMFactory;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.apache.nifi.util.LoggingXmlParserErrorHandler;
+ import org.apache.nifi.web.api.dto.PortDTO;
+ import org.slf4j.Logger;
+@@ -28,23 +44,6 @@
+ import org.w3c.dom.NodeList;
+ import org.xml.sax.SAXException;
+ 
+-import javax.xml.XMLConstants;
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.validation.Schema;
+-import javax.xml.validation.SchemaFactory;
+-import java.io.ByteArrayInputStream;
+-import java.io.File;
+-import java.io.IOException;
+-import java.io.InputStream;
+-import java.nio.file.Files;
+-import java.nio.file.Path;
+-import java.nio.file.StandardOpenOption;
+-import java.util.ArrayList;
+-import java.util.List;
+-import java.util.zip.GZIPInputStream;
+-
+ /**
+  * Parses a flow and returns the root group id and root group ports.
+  */
+@@ -54,12 +53,12 @@ public class FlowParser {
+ 
+     private static final String FLOW_XSD = "/FlowConfiguration.xsd";
+ 
+-    private Schema flowSchema;
+-    private SchemaFactory schemaFactory;
++    private final Schema flowSchema;
++    private final SchemaFactory schemaFactory;
+ 
+     public FlowParser() throws SAXException {
+         schemaFactory = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI);
+-        flowSchema = schemaFactory.newSchema(FileAuthorizer.class.getResource(FLOW_XSD));
++        flowSchema = schemaFactory.newSchema(FlowParser.class.getResource(FLOW_XSD));
+     }
+ 
+     /**
+@@ -96,13 +95,10 @@ public FlowInfo parse(final File flowConfigurationFile) {
+             }
+ 
+             // create validating document builder
+-            final DocumentBuilderFactory docFactory = DocumentBuilderFactory.newInstance();
+-            docFactory.setNamespaceAware(true);
+-            docFactory.setSchema(flowSchema);
++            final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(flowSchema);
++            docBuilder.setErrorHandler(new LoggingXmlParserErrorHandler("Flow Configuration", logger));
+ 
+             // parse the flow
+-            final DocumentBuilder docBuilder = docFactory.newDocumentBuilder();
+-            docBuilder.setErrorHandler(new LoggingXmlParserErrorHandler("Flow Configuration", logger));
+             final Document document = docBuilder.parse(new ByteArrayInputStream(flowBytes));
+ 
+             // extract the root group id
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/test/groovy/org/apache/nifi/authorization/FlowParserTest.groovy b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/test/groovy/org/apache/nifi/authorization/FlowParserTest.groovy
+new file mode 100644
+index 000000000000..11960f462acc
+--- /dev/null
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/test/groovy/org/apache/nifi/authorization/FlowParserTest.groovy
+@@ -0,0 +1,66 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.nifi.authorization
++
++
++import org.junit.After
++import org.junit.Before
++import org.junit.BeforeClass
++import org.junit.Test
++import org.junit.runner.RunWith
++import org.junit.runners.JUnit4
++import org.slf4j.Logger
++import org.slf4j.LoggerFactory
++
++@RunWith(JUnit4.class)
++class FlowParserTest extends GroovyTestCase {
++    private static final Logger logger = LoggerFactory.getLogger(FlowParserTest.class)
++
++    @BeforeClass
++    static void setUpOnce() throws Exception {
++        logger.metaClass.methodMissing = { String name, args ->
++            logger.info("[${name?.toUpperCase()}] ${(args as List).join(" ")}")
++        }
++    }
++
++    @Before
++    void setUp() throws Exception {
++
++    }
++
++    @After
++    void tearDown() throws Exception {
++
++    }
++
++    @Test
++    void testShouldHandleXXEInDocumentBuilder() {
++        // Arrange
++        final String XXE_TEMPLATE_FILEPATH = "src/test/resources/flow-with-xxe.xml.gz"
++
++        FlowParser fp = new FlowParser()
++
++        // Act
++        def parsedFlow = fp.parse(new File(XXE_TEMPLATE_FILEPATH))
++        logger.info("Parsed ${parsedFlow.toString()}")
++
++        // Assert
++
++        // The existing logic logs & swallows any exceptions and returns null
++        assert !parsedFlow
++    }
++}
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/test/resources/flow-with-xxe.xml.gz b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-file-authorizer/src/test/resources/flow-with-xxe.xml.gz
+new file mode 100644
+index 0000000000000000000000000000000000000000..241f0047536cdf35acbb976e32602635cb245d43
+GIT binary patch
+literal 794
+zcmV+#1Lgc5iwFo8XCGex17>V*cP)2mbZ9Mjcx5hlZEOJDRoiZxKoEV;S8RC4fX&6O
+z2vHO}k)_75Y|<*Ks%n98vMSz1yG!Eq>pNf|zQmQ<$G(8(%*@W2+irNdS?A;hq+)_!
+z7*5YN2=G*7j6Yo%5AlsTG>FoaXEYZaE(|V=%P2e_-(Sa%^9kXgRl&%&@O(0hr|~1%
+zY=A5um+|C|7%P^;C(E)xr&d9gdd&<HeUHw<RW4qy1=mvKImj-cxyK_qBP3kYP0ZFH
+z$CAAOkDn#b>{^suM~)p@r?rjm1Yv!w^=j7>%F0y=p>L%qi%LS7Wf6D-8yq(^X_l@`
+z*Gc<k;$^;>ji@(D=rHiTG_=rg>%r+7q8Ynk<OY)sty<oy3Za<BG|A?|u&aW<ZU0uI
+zPsMtT%v!OKA_b*{+{#-vUXlev$4$&31S8W8Qs1QR07Yb&_{m@u42JJ)T0Rd&Mm1b%
+zEm=}(*kyIVtM3I3GspMdxuKQPZ#k%Ud7o_s<k;#+$fq7HX!;C2&Q`3~Wubbsjjwt~
+zgtpG@QP?CLleCl)Bg9nwRFPA+?hx(BVZ5x&ahB#FnaCoWD8RNH;a$$aY0iGpD(^-$
+zXna0UwO(%w@~pv}t@SR{nk6NUw`Tk^yg(j(y;{sdYaeSZbD>l$a2F^J;ELu7OR<L?
+zBna73W8tD@d_SL0#$AFfeq4{GmZ*4oi{k0sWbtFXn0}eeb_>%Pw7#<B<5Je?&nOov
+z!i77+x;jcxfYhCLJ8@&cY=LwgR%Eg%Bn|?ea4>$>{u#BrJNO~vMXBdP>fJ@?uY%0+
+zZQo4nk!`vO1SaldA3sT8uM*Gm2F~#!#Mg5&t&aP{3OGZrH*kI5@kf39^&P+72j3s|
+zhE8DH1G^u%uIm{`yRfqz2Yp#Q%x2Ts?a6-q^}v@3<W*Xgsku+13h_hhSkbyXRrlJy
+zs)jJo2dbtQ2el7HssF7R{g0b*U!V7XcEdf{jnLY!BQDtP!-E;LZ{!l>3rm}OH<VDI
+Y2QF<L9<k8ce^R5f-@r>Iec1;90He~4Pyhe`
+
+literal 0
+HcmV?d00001
+
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-authorization/pom.xml b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-authorization/pom.xml
+index 5c674c692a0d..0bb64280b93b 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-authorization/pom.xml
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-authorization/pom.xml
+@@ -31,6 +31,11 @@
+             <groupId>org.apache.nifi</groupId>
+             <artifactId>nifi-framework-api</artifactId>
+         </dependency>
++        <dependency>
++            <groupId>org.apache.nifi</groupId>
++            <artifactId>nifi-security-utils</artifactId>
++            <version>1.12.0-SNAPSHOT</version>
++        </dependency>
+         <dependency>
+             <groupId>org.apache.nifi</groupId>
+             <artifactId>nifi-expression-language</artifactId>
+@@ -47,7 +52,6 @@
+             <groupId>org.apache.commons</groupId>
+             <artifactId>commons-lang3</artifactId>
+         </dependency>
+-
+         <dependency>
+             <groupId>org.apache.nifi</groupId>
+             <artifactId>nifi-mock-authorizer</artifactId>
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-authorization/src/main/java/org/apache/nifi/authorization/StandardManagedAuthorizer.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-authorization/src/main/java/org/apache/nifi/authorization/StandardManagedAuthorizer.java
+index 7c1e9c812ccf..7f311362cd09 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-authorization/src/main/java/org/apache/nifi/authorization/StandardManagedAuthorizer.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-authorization/src/main/java/org/apache/nifi/authorization/StandardManagedAuthorizer.java
+@@ -16,33 +16,30 @@
+  */
+ package org.apache.nifi.authorization;
+ 
++import java.io.ByteArrayInputStream;
++import java.io.IOException;
++import java.io.StringWriter;
++import java.nio.charset.StandardCharsets;
++import java.util.Set;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.stream.XMLOutputFactory;
++import javax.xml.stream.XMLStreamException;
++import javax.xml.stream.XMLStreamWriter;
+ import org.apache.commons.lang3.StringUtils;
+ import org.apache.nifi.authorization.exception.AuthorizationAccessException;
+ import org.apache.nifi.authorization.exception.AuthorizerCreationException;
+ import org.apache.nifi.authorization.exception.AuthorizerDestructionException;
+ import org.apache.nifi.authorization.exception.UninheritableAuthorizationsException;
+ import org.apache.nifi.components.PropertyValue;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.Node;
+ import org.w3c.dom.NodeList;
+ import org.xml.sax.SAXException;
+ 
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.stream.XMLOutputFactory;
+-import javax.xml.stream.XMLStreamException;
+-import javax.xml.stream.XMLStreamWriter;
+-import java.io.ByteArrayInputStream;
+-import java.io.IOException;
+-import java.io.StringWriter;
+-import java.nio.charset.StandardCharsets;
+-import java.util.Set;
+-
+ public class StandardManagedAuthorizer implements ManagedAuthorizer {
+-
+-    private static final DocumentBuilderFactory DOCUMENT_BUILDER_FACTORY = DocumentBuilderFactory.newInstance();
+     private static final XMLOutputFactory XML_OUTPUT_FACTORY = XMLOutputFactory.newInstance();
+ 
+     private static final String USER_GROUP_PROVIDER_ELEMENT = "userGroupProvider";
+@@ -217,7 +214,7 @@ private final FingerprintHolder parseFingerprint(final String fingerprint) throw
+         final byte[] fingerprintBytes = fingerprint.getBytes(StandardCharsets.UTF_8);
+ 
+         try (final ByteArrayInputStream in = new ByteArrayInputStream(fingerprintBytes)) {
+-            final DocumentBuilder docBuilder = DOCUMENT_BUILDER_FACTORY.newDocumentBuilder();
++            final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(true);
+             final Document document = docBuilder.parse(in);
+             final Element rootElement = document.getDocumentElement();
+ 
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-cluster-protocol/src/main/java/org/apache/nifi/cluster/protocol/StandardDataFlow.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-cluster-protocol/src/main/java/org/apache/nifi/cluster/protocol/StandardDataFlow.java
+index cadaad0509fe..3ac205264561 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-cluster-protocol/src/main/java/org/apache/nifi/cluster/protocol/StandardDataFlow.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-cluster-protocol/src/main/java/org/apache/nifi/cluster/protocol/StandardDataFlow.java
+@@ -16,19 +16,6 @@
+  */
+ package org.apache.nifi.cluster.protocol;
+ 
+-import org.apache.nifi.cluster.protocol.jaxb.message.DataFlowAdapter;
+-import org.apache.nifi.controller.serialization.FlowSerializationException;
+-import org.slf4j.Logger;
+-import org.slf4j.LoggerFactory;
+-import org.w3c.dom.Document;
+-import org.xml.sax.SAXException;
+-import org.xml.sax.SAXParseException;
+-import org.xml.sax.helpers.DefaultHandler;
+-
+-import javax.xml.bind.annotation.adapters.XmlJavaTypeAdapter;
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+ import java.io.ByteArrayInputStream;
+ import java.io.IOException;
+ import java.io.Serializable;
+@@ -37,6 +24,18 @@
+ import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.Set;
++import javax.xml.bind.annotation.adapters.XmlJavaTypeAdapter;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.ParserConfigurationException;
++import org.apache.nifi.cluster.protocol.jaxb.message.DataFlowAdapter;
++import org.apache.nifi.controller.serialization.FlowSerializationException;
++import org.apache.nifi.security.xml.XmlUtils;
++import org.slf4j.Logger;
++import org.slf4j.LoggerFactory;
++import org.w3c.dom.Document;
++import org.xml.sax.SAXException;
++import org.xml.sax.SAXParseException;
++import org.xml.sax.helpers.DefaultHandler;
+ 
+ /**
+  * Represents a dataflow, which includes the raw bytes of the flow.xml and
+@@ -123,10 +122,7 @@ private static Document parseFlowBytes(final byte[] flow) throws FlowSerializati
+         // create document by parsing proposed flow bytes
+         try {
+             // create validating document builder
+-            final DocumentBuilderFactory docFactory = DocumentBuilderFactory.newInstance();
+-            docFactory.setNamespaceAware(true);
+-
+-            final DocumentBuilder docBuilder = docFactory.newDocumentBuilder();
++            final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(true);
+             docBuilder.setErrorHandler(new DefaultHandler() {
+                 @Override
+                 public void error(final SAXParseException e) {
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/serialization/StandardFlowSerializer.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/serialization/StandardFlowSerializer.java
+index 920ccf5a3a74..950da5cbfca5 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/serialization/StandardFlowSerializer.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/serialization/StandardFlowSerializer.java
+@@ -16,6 +16,22 @@
+  */
+ package org.apache.nifi.controller.serialization;
+ 
++import java.io.BufferedOutputStream;
++import java.io.ByteArrayInputStream;
++import java.io.InputStream;
++import java.io.OutputStream;
++import java.util.Map;
++import java.util.Optional;
++import java.util.concurrent.TimeUnit;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.transform.OutputKeys;
++import javax.xml.transform.Transformer;
++import javax.xml.transform.TransformerException;
++import javax.xml.transform.TransformerFactory;
++import javax.xml.transform.TransformerFactoryConfigurationError;
++import javax.xml.transform.dom.DOMSource;
++import javax.xml.transform.stream.StreamResult;
+ import org.apache.nifi.bundle.BundleCoordinate;
+ import org.apache.nifi.components.PropertyDescriptor;
+ import org.apache.nifi.connectable.ConnectableType;
+@@ -48,6 +64,7 @@
+ import org.apache.nifi.registry.flow.VersionControlInformation;
+ import org.apache.nifi.remote.PublicPort;
+ import org.apache.nifi.remote.RemoteGroupPort;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.apache.nifi.util.CharacterFilterUtils;
+ import org.apache.nifi.util.StringUtils;
+ import org.w3c.dom.DOMException;
+@@ -55,24 +72,6 @@
+ import org.w3c.dom.Element;
+ import org.w3c.dom.Node;
+ 
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.transform.OutputKeys;
+-import javax.xml.transform.Transformer;
+-import javax.xml.transform.TransformerException;
+-import javax.xml.transform.TransformerFactory;
+-import javax.xml.transform.TransformerFactoryConfigurationError;
+-import javax.xml.transform.dom.DOMSource;
+-import javax.xml.transform.stream.StreamResult;
+-import java.io.BufferedOutputStream;
+-import java.io.ByteArrayInputStream;
+-import java.io.InputStream;
+-import java.io.OutputStream;
+-import java.util.Map;
+-import java.util.Optional;
+-import java.util.concurrent.TimeUnit;
+-
+ /**
+  * Serializes a Flow Controller as XML to an output stream.
+  *
+@@ -93,10 +92,7 @@ public StandardFlowSerializer(final StringEncryptor encryptor) {
+     public Document transform(final FlowController controller, final ScheduledStateLookup scheduledStateLookup) throws FlowSerializationException {
+         try {
+             // create a new, empty document
+-            final DocumentBuilderFactory docFactory = DocumentBuilderFactory.newInstance();
+-            docFactory.setNamespaceAware(true);
+-
+-            final DocumentBuilder docBuilder = docFactory.newDocumentBuilder();
++            final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(true);
+             final Document doc = docBuilder.newDocument();
+ 
+             // populate document with controller state
+@@ -671,8 +667,7 @@ public static void addTemplate(final Element element, final Template template) {
+         try {
+             final byte[] serialized = TemplateSerializer.serialize(template.getDetails());
+ 
+-            final DocumentBuilderFactory docBuilderFactory = DocumentBuilderFactory.newInstance();
+-            final DocumentBuilder docBuilder = docBuilderFactory.newDocumentBuilder();
++            final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(true);
+             final Document document;
+             try (final InputStream in = new ByteArrayInputStream(serialized)) {
+                 document = docBuilder.parse(in);
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/service/ControllerServiceLoader.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/service/ControllerServiceLoader.java
+index 06ea3a79b182..89b43e80396e 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/service/ControllerServiceLoader.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/service/ControllerServiceLoader.java
+@@ -16,6 +16,21 @@
+  */
+ package org.apache.nifi.controller.service;
+ 
++import java.io.BufferedInputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.Collection;
++import java.util.Collections;
++import java.util.HashMap;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Map;
++import java.util.Set;
++import java.util.UUID;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.ParserConfigurationException;
+ import org.apache.nifi.bundle.BundleCoordinate;
+ import org.apache.nifi.components.PropertyDescriptor;
+ import org.apache.nifi.controller.FlowController;
+@@ -24,6 +39,7 @@
+ import org.apache.nifi.encrypt.StringEncryptor;
+ import org.apache.nifi.groups.ProcessGroup;
+ import org.apache.nifi.reporting.BulletinRepository;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.apache.nifi.util.BundleUtils;
+ import org.apache.nifi.util.DomUtils;
+ import org.apache.nifi.web.api.dto.BundleDTO;
+@@ -35,23 +51,6 @@
+ import org.xml.sax.SAXException;
+ import org.xml.sax.SAXParseException;
+ 
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import java.io.BufferedInputStream;
+-import java.io.IOException;
+-import java.io.InputStream;
+-import java.nio.charset.StandardCharsets;
+-import java.util.ArrayList;
+-import java.util.Collection;
+-import java.util.Collections;
+-import java.util.HashMap;
+-import java.util.HashSet;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.Set;
+-import java.util.UUID;
+-
+ public class ControllerServiceLoader {
+ 
+     private static final Logger logger = LoggerFactory.getLogger(ControllerServiceLoader.class);
+@@ -59,11 +58,8 @@ public class ControllerServiceLoader {
+     public static List<ControllerServiceNode> loadControllerServices(final FlowController controller, final InputStream serializedStream, final ProcessGroup parentGroup,
+         final StringEncryptor encryptor, final BulletinRepository bulletinRepo, final boolean autoResumeState, final FlowEncodingVersion encodingVersion) throws IOException {
+ 
+-        final DocumentBuilderFactory documentBuilderFactory = DocumentBuilderFactory.newInstance();
+-        documentBuilderFactory.setNamespaceAware(true);
+-
+         try (final InputStream in = new BufferedInputStream(serializedStream)) {
+-            final DocumentBuilder builder = documentBuilderFactory.newDocumentBuilder();
++            final DocumentBuilder builder = XmlUtils.createSafeDocumentBuilder(null);
+ 
+             builder.setErrorHandler(new org.xml.sax.ErrorHandler() {
+ 
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/state/config/StateManagerConfiguration.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/state/config/StateManagerConfiguration.java
+index 7565d9a6b1c0..9795a72955c5 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/state/config/StateManagerConfiguration.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/controller/state/config/StateManagerConfiguration.java
+@@ -24,13 +24,11 @@
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
+-
+ import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+ import javax.xml.parsers.ParserConfigurationException;
+-
+ import org.apache.nifi.components.state.Scope;
+ import org.apache.nifi.controller.state.ConfigParseException;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.apache.nifi.util.DomUtils;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+@@ -63,13 +61,10 @@ public List<StateProviderConfiguration> getStateProviderConfigurations(final Sco
+     }
+ 
+     public static StateManagerConfiguration parse(final File configFile) throws IOException, ConfigParseException {
+-        final DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+-        factory.setNamespaceAware(false);
+-
+         final Document document;
+         DocumentBuilder builder;
+         try {
+-            builder = factory.newDocumentBuilder();
++            builder = XmlUtils.createSafeDocumentBuilder(false);
+             document = builder.parse(configFile);
+         } catch (ParserConfigurationException | SAXException e) {
+             throw new ConfigParseException("Unable to parse file " + configFile + ", as it does not appear to be a valid XML File", e);
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/fingerprint/FingerprintFactory.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/fingerprint/FingerprintFactory.java
+index 6b7af3bb1f3f..f720121cfc3a 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/fingerprint/FingerprintFactory.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/main/java/org/apache/nifi/fingerprint/FingerprintFactory.java
+@@ -34,7 +34,6 @@
+ import javax.crypto.spec.SecretKeySpec;
+ import javax.xml.XMLConstants;
+ import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+ import javax.xml.validation.Schema;
+ import javax.xml.validation.SchemaFactory;
+ import org.apache.commons.lang3.StringUtils;
+@@ -48,6 +47,7 @@
+ import org.apache.nifi.nar.ExtensionManager;
+ import org.apache.nifi.properties.NiFiPropertiesLoader;
+ import org.apache.nifi.security.util.crypto.Argon2SecureHasher;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.apache.nifi.util.BundleUtils;
+ import org.apache.nifi.util.DomUtils;
+ import org.apache.nifi.util.LoggingXmlParserErrorHandler;
+@@ -101,8 +101,6 @@ public FingerprintFactory(final StringEncryptor encryptor, final ExtensionManage
+         this.encryptor = encryptor;
+         this.extensionManager = extensionManager;
+ 
+-        final DocumentBuilderFactory documentBuilderFactory = DocumentBuilderFactory.newInstance();
+-        documentBuilderFactory.setNamespaceAware(true);
+         final SchemaFactory schemaFactory = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI);
+         final Schema schema;
+         try {
+@@ -111,8 +109,7 @@ public FingerprintFactory(final StringEncryptor encryptor, final ExtensionManage
+             throw new RuntimeException("Failed to parse schema for file flow configuration.", e);
+         }
+         try {
+-            documentBuilderFactory.setSchema(schema);
+-            flowConfigDocBuilder = documentBuilderFactory.newDocumentBuilder();
++            flowConfigDocBuilder = XmlUtils.createSafeDocumentBuilder(schema, true);
+             flowConfigDocBuilder.setErrorHandler(new LoggingXmlParserErrorHandler("Flow Configuration", logger));
+         } catch (final Exception e) {
+             throw new RuntimeException("Failed to create document builder for flow configuration.", e);
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/test/java/org/apache/nifi/fingerprint/FingerprintFactoryTest.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/test/java/org/apache/nifi/fingerprint/FingerprintFactoryTest.java
+index c84a885f5dbe..b92374f8047a 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/test/java/org/apache/nifi/fingerprint/FingerprintFactoryTest.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-framework-core/src/test/java/org/apache/nifi/fingerprint/FingerprintFactoryTest.java
+@@ -36,7 +36,6 @@
+ import javax.crypto.spec.SecretKeySpec;
+ import javax.xml.XMLConstants;
+ import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+ import javax.xml.parsers.ParserConfigurationException;
+ import javax.xml.validation.Schema;
+ import javax.xml.validation.SchemaFactory;
+@@ -56,6 +55,7 @@
+ import org.apache.nifi.remote.RemoteGroupPort;
+ import org.apache.nifi.remote.protocol.SiteToSiteTransportProtocol;
+ import org.apache.nifi.security.util.crypto.Argon2SecureHasher;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.apache.nifi.util.NiFiProperties;
+ import org.junit.AfterClass;
+ import org.junit.Before;
+@@ -163,8 +163,6 @@ private byte[] getResourceBytes(final String resource) throws IOException {
+     }
+ 
+     private DocumentBuilder getValidatingDocumentBuilder() {
+-        final DocumentBuilderFactory documentBuilderFactory = DocumentBuilderFactory.newInstance();
+-        documentBuilderFactory.setNamespaceAware(true);
+         final SchemaFactory schemaFactory = SchemaFactory.newInstance(XMLConstants.W3C_XML_SCHEMA_NS_URI);
+         final Schema schema;
+         try {
+@@ -173,8 +171,7 @@ private DocumentBuilder getValidatingDocumentBuilder() {
+             throw new RuntimeException("Failed to parse schema for file flow configuration.", e);
+         }
+         try {
+-            documentBuilderFactory.setSchema(schema);
+-            DocumentBuilder docBuilder = documentBuilderFactory.newDocumentBuilder();
++            DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(schema, true);
+             docBuilder.setErrorHandler(new ErrorHandler() {
+                 @Override
+                 public void warning(SAXParseException e) throws SAXException {
+@@ -199,9 +196,7 @@ public void fatalError(SAXParseException e) throws SAXException {
+ 
+     private <T> Element serializeElement(final StringEncryptor encryptor, final Class<T> componentClass, final T component,
+                                          final String serializerMethodName, ScheduledStateLookup scheduledStateLookup) throws Exception {
+-
+-        final DocumentBuilderFactory docFactory = DocumentBuilderFactory.newInstance();
+-        final DocumentBuilder docBuilder = docFactory.newDocumentBuilder();
++        final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(false);
+         final Document doc = docBuilder.newDocument();
+ 
+         final FlowSerializer flowSerializer = new StandardFlowSerializer(encryptor);
+@@ -362,8 +357,7 @@ public void testRemotePortFingerprint() throws Exception {
+ 
+     @Test
+     public void testControllerServicesIncludedInGroupFingerprint() throws ParserConfigurationException, IOException, SAXException {
+-        final DocumentBuilderFactory docBuilderFactory = DocumentBuilderFactory.newInstance();
+-        final DocumentBuilder docBuilder = docBuilderFactory.newDocumentBuilder();
++        final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(false);
+         final Document document = docBuilder.parse(new File("src/test/resources/nifi/fingerprint/group-with-controller-services.xml"));
+         final Element processGroup = document.getDocumentElement();
+ 
+diff --git a/nifi-nar-bundles/nifi-ranger-bundle/nifi-ranger-plugin/pom.xml b/nifi-nar-bundles/nifi-ranger-bundle/nifi-ranger-plugin/pom.xml
+index 0444fce31645..c21857ae032c 100644
+--- a/nifi-nar-bundles/nifi-ranger-bundle/nifi-ranger-plugin/pom.xml
++++ b/nifi-nar-bundles/nifi-ranger-bundle/nifi-ranger-plugin/pom.xml
+@@ -111,6 +111,11 @@
+             <artifactId>hadoop-auth</artifactId>
+             <version>${ranger.hadoop.version}</version>
+         </dependency>
++        <dependency>
++            <groupId>org.apache.nifi</groupId>
++            <artifactId>nifi-security-utils</artifactId>
++            <version>1.12.0-SNAPSHOT</version>
++        </dependency>
+         <dependency>
+             <groupId>org.apache.nifi</groupId>
+             <artifactId>nifi-mock</artifactId>
+diff --git a/nifi-nar-bundles/nifi-ranger-bundle/nifi-ranger-plugin/src/main/java/org/apache/nifi/ranger/authorization/ManagedRangerAuthorizer.java b/nifi-nar-bundles/nifi-ranger-bundle/nifi-ranger-plugin/src/main/java/org/apache/nifi/ranger/authorization/ManagedRangerAuthorizer.java
+index 45bdb1ff62c7..f427346d5534 100644
+--- a/nifi-nar-bundles/nifi-ranger-bundle/nifi-ranger-plugin/src/main/java/org/apache/nifi/ranger/authorization/ManagedRangerAuthorizer.java
++++ b/nifi-nar-bundles/nifi-ranger-bundle/nifi-ranger-plugin/src/main/java/org/apache/nifi/ranger/authorization/ManagedRangerAuthorizer.java
+@@ -18,6 +18,18 @@
+  */
+ package org.apache.nifi.ranger.authorization;
+ 
++import java.io.ByteArrayInputStream;
++import java.io.IOException;
++import java.io.StringWriter;
++import java.nio.charset.StandardCharsets;
++import java.util.Set;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.ParserConfigurationException;
++import javax.xml.transform.Transformer;
++import javax.xml.transform.TransformerException;
++import javax.xml.transform.TransformerFactory;
++import javax.xml.transform.dom.DOMSource;
++import javax.xml.transform.stream.StreamResult;
+ import org.apache.commons.lang.StringUtils;
+ import org.apache.nifi.authorization.AccessPolicy;
+ import org.apache.nifi.authorization.AccessPolicyProvider;
+@@ -33,30 +45,14 @@
+ import org.apache.nifi.authorization.exception.AuthorizerCreationException;
+ import org.apache.nifi.authorization.exception.AuthorizerDestructionException;
+ import org.apache.nifi.authorization.exception.UninheritableAuthorizationsException;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.Node;
+ import org.w3c.dom.NodeList;
+ import org.xml.sax.SAXException;
+ 
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import javax.xml.transform.Transformer;
+-import javax.xml.transform.TransformerException;
+-import javax.xml.transform.TransformerFactory;
+-import javax.xml.transform.dom.DOMSource;
+-import javax.xml.transform.stream.StreamResult;
+-import java.io.ByteArrayInputStream;
+-import java.io.IOException;
+-import java.io.StringWriter;
+-import java.nio.charset.StandardCharsets;
+-import java.util.Set;
+-
+ public class ManagedRangerAuthorizer extends RangerNiFiAuthorizer implements ManagedAuthorizer {
+-
+-    private static final DocumentBuilderFactory DOCUMENT_BUILDER_FACTORY = DocumentBuilderFactory.newInstance();
+-
+     private static final String USER_GROUP_PROVIDER_ELEMENT = "userGroupProvider";
+ 
+     private UserGroupProviderLookup userGroupProviderLookup;
+@@ -132,7 +128,7 @@ public String getFingerprint() throws AuthorizationAccessException {
+         final StringWriter out = new StringWriter();
+         try {
+             // create the document
+-            final DocumentBuilder documentBuilder = DOCUMENT_BUILDER_FACTORY.newDocumentBuilder();
++            final DocumentBuilder documentBuilder = XmlUtils.createSafeDocumentBuilder(false);
+             final Document document = documentBuilder.newDocument();
+ 
+             // create the root element
+@@ -196,7 +192,7 @@ private String parseFingerprint(final String fingerprint) throws AuthorizationAc
+         final byte[] fingerprintBytes = fingerprint.getBytes(StandardCharsets.UTF_8);
+ 
+         try (final ByteArrayInputStream in = new ByteArrayInputStream(fingerprintBytes)) {
+-            final DocumentBuilder docBuilder = DOCUMENT_BUILDER_FACTORY.newDocumentBuilder();
++            final DocumentBuilder docBuilder = XmlUtils.createSafeDocumentBuilder(false);
+             final Document document = docBuilder.parse(in);
+             final Element rootElement = document.getDocumentElement();
+ 
+diff --git a/nifi-nar-bundles/nifi-standard-bundle/nifi-standard-processors/src/main/java/org/apache/nifi/processors/standard/EvaluateXQuery.java b/nifi-nar-bundles/nifi-standard-bundle/nifi-standard-processors/src/main/java/org/apache/nifi/processors/standard/EvaluateXQuery.java
+index 85b50eb17292..cf58ab7aa1ee 100644
+--- a/nifi-nar-bundles/nifi-standard-bundle/nifi-standard-processors/src/main/java/org/apache/nifi/processors/standard/EvaluateXQuery.java
++++ b/nifi-nar-bundles/nifi-standard-bundle/nifi-standard-processors/src/main/java/org/apache/nifi/processors/standard/EvaluateXQuery.java
+@@ -23,6 +23,7 @@
+ import java.io.InputStream;
+ import java.io.OutputStream;
+ import java.io.StringReader;
++import java.nio.charset.StandardCharsets;
+ import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.Collections;
+@@ -33,7 +34,6 @@
+ import java.util.Properties;
+ import java.util.Set;
+ import java.util.concurrent.atomic.AtomicReference;
+-import javax.xml.parsers.DocumentBuilderFactory;
+ import javax.xml.transform.OutputKeys;
+ import javax.xml.transform.Transformer;
+ import javax.xml.transform.TransformerException;
+@@ -75,6 +75,7 @@
+ import org.apache.nifi.processor.io.InputStreamCallback;
+ import org.apache.nifi.processor.io.OutputStreamCallback;
+ import org.apache.nifi.processor.util.StandardValidators;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.w3c.dom.Document;
+ import org.xml.sax.EntityResolver;
+ import org.xml.sax.InputSource;
+@@ -307,9 +308,7 @@ public void process(final InputStream rawIn) throws IOException {
+                     try (final InputStream in = new BufferedInputStream(rawIn)) {
+                         XQueryEvaluator qe = slashExpression.load();
+                         qe.setSource(new SAXSource(xmlReader, new InputSource(in)));
+-                        DocumentBuilderFactory dfactory = DocumentBuilderFactory.newInstance();
+-                        dfactory.setNamespaceAware(true);
+-                        Document dom = dfactory.newDocumentBuilder().newDocument();
++                        Document dom = XmlUtils.createSafeDocumentBuilder(true).newDocument();
+                         qe.run(new DOMDestination(dom));
+                         XdmNode rootNode = proc.newDocumentBuilder().wrap(dom);
+                         sourceRef.set(rootNode);
+@@ -428,7 +427,7 @@ void writeformattedItem(XdmItem item, ProcessContext context, OutputStream out)
+             throws TransformerFactoryConfigurationError, TransformerException, IOException {
+ 
+         if (item.isAtomicValue()) {
+-            out.write(item.getStringValue().getBytes(UTF8));
++            out.write(item.getStringValue().getBytes(StandardCharsets.UTF_8));
+         } else { // item is an XdmNode
+             XdmNode node = (XdmNode) item;
+             switch (node.getNodeKind()) {
+@@ -440,7 +439,7 @@ void writeformattedItem(XdmItem item, ProcessContext context, OutputStream out)
+                     transformer.transform(node.asSource(), new StreamResult(out));
+                     break;
+                 default:
+-                    out.write(node.getStringValue().getBytes(UTF8));
++                    out.write(node.getStringValue().getBytes(StandardCharsets.UTF_8));
+             }
+         }
+     }
+diff --git a/nifi-nar-bundles/nifi-standard-bundle/nifi-standard-processors/src/main/java/org/apache/nifi/processors/standard/util/DocumentReaderCallback.java b/nifi-nar-bundles/nifi-standard-bundle/nifi-standard-processors/src/main/java/org/apache/nifi/processors/standard/util/DocumentReaderCallback.java
+index 4bca49158d0d..89d1485c6138 100644
+--- a/nifi-nar-bundles/nifi-standard-bundle/nifi-standard-processors/src/main/java/org/apache/nifi/processors/standard/util/DocumentReaderCallback.java
++++ b/nifi-nar-bundles/nifi-standard-bundle/nifi-standard-processors/src/main/java/org/apache/nifi/processors/standard/util/DocumentReaderCallback.java
+@@ -18,13 +18,10 @@
+ 
+ import java.io.IOException;
+ import java.io.InputStream;
+-
+ import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+ import javax.xml.parsers.ParserConfigurationException;
+-
+ import org.apache.nifi.processor.io.InputStreamCallback;
+-
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.w3c.dom.Document;
+ import org.xml.sax.SAXException;
+ 
+@@ -34,7 +31,7 @@ public class DocumentReaderCallback implements InputStreamCallback {
+     private Document document;
+ 
+     /**
+-     * Creates a new DocumentReaderCallback .
++     * Creates a new DocumentReaderCallback.
+      *
+      * @param isNamespaceAware Whether or not the parse should consider namespaces
+      */
+@@ -45,14 +42,10 @@ public DocumentReaderCallback(boolean isNamespaceAware) {
+     @Override
+     public void process(final InputStream stream) throws IOException {
+         try {
+-            DocumentBuilderFactory factory = DocumentBuilderFactory.newInstance();
+-            factory.setNamespaceAware(isNamespaceAware);
+-            DocumentBuilder builder = factory.newDocumentBuilder();
++            DocumentBuilder builder = XmlUtils.createSafeDocumentBuilder(isNamespaceAware);
+             document = builder.parse(stream);
+-        } catch (ParserConfigurationException pce) {
++        } catch (ParserConfigurationException | SAXException pce) {
+             throw new IOException(pce.getLocalizedMessage(), pce);
+-        } catch (SAXException saxe) {
+-            throw new IOException(saxe.getLocalizedMessage(), saxe);
+         }
+     }
+ 
+diff --git a/nifi-system-tests/nifi-system-test-suite/src/test/java/org/apache/nifi/tests/system/clustering/JoinClusterWithDifferentFlow.java b/nifi-system-tests/nifi-system-test-suite/src/test/java/org/apache/nifi/tests/system/clustering/JoinClusterWithDifferentFlow.java
+index 580ceb167d09..3b1e72f9dcbb 100644
+--- a/nifi-system-tests/nifi-system-test-suite/src/test/java/org/apache/nifi/tests/system/clustering/JoinClusterWithDifferentFlow.java
++++ b/nifi-system-tests/nifi-system-test-suite/src/test/java/org/apache/nifi/tests/system/clustering/JoinClusterWithDifferentFlow.java
+@@ -16,9 +16,29 @@
+  */
+ package org.apache.nifi.tests.system.clustering;
+ 
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertFalse;
++
++import java.io.ByteArrayOutputStream;
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.io.StringReader;
++import java.nio.charset.StandardCharsets;
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.List;
++import java.util.Map;
++import java.util.Properties;
++import java.util.Set;
++import java.util.zip.GZIPInputStream;
++import javax.xml.parsers.DocumentBuilder;
++import javax.xml.parsers.ParserConfigurationException;
+ import org.apache.nifi.controller.serialization.FlowEncodingVersion;
+ import org.apache.nifi.controller.serialization.FlowFromDOMFactory;
+ import org.apache.nifi.encrypt.StringEncryptor;
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.apache.nifi.tests.system.InstanceConfiguration;
+ import org.apache.nifi.tests.system.NiFiInstance;
+ import org.apache.nifi.tests.system.NiFiInstanceFactory;
+@@ -49,27 +69,6 @@
+ import org.xml.sax.InputSource;
+ import org.xml.sax.SAXException;
+ 
+-import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-import javax.xml.parsers.ParserConfigurationException;
+-import java.io.ByteArrayOutputStream;
+-import java.io.File;
+-import java.io.FileInputStream;
+-import java.io.IOException;
+-import java.io.InputStream;
+-import java.io.StringReader;
+-import java.nio.charset.StandardCharsets;
+-import java.util.ArrayList;
+-import java.util.Arrays;
+-import java.util.List;
+-import java.util.Map;
+-import java.util.Properties;
+-import java.util.Set;
+-import java.util.zip.GZIPInputStream;
+-
+-import static org.junit.Assert.assertEquals;
+-import static org.junit.Assert.assertFalse;
+-
+ public class JoinClusterWithDifferentFlow extends NiFiSystemIT {
+     @Override
+     protected NiFiInstanceFactory getInstanceFactory() {
+@@ -128,7 +127,7 @@ private void verifyFlowContentsOnDisk(final File backupFile) throws IOException,
+         final File confDir = backupFile.getParentFile();
+         final String loadedFlow = readFlow(new File(confDir, "flow.xml.gz"));
+ 
+-        final DocumentBuilder documentBuilder = DocumentBuilderFactory.newInstance().newDocumentBuilder();
++        final DocumentBuilder documentBuilder = XmlUtils.createSafeDocumentBuilder(false);
+         final Document document = documentBuilder.parse(new InputSource(new StringReader(loadedFlow)));
+         final Element rootElement = (Element) document.getElementsByTagName("flowController").item(0);
+         final FlowEncodingVersion encodingVersion = FlowEncodingVersion.parse(rootElement);
+diff --git a/nifi-toolkit/nifi-toolkit-flowanalyzer/pom.xml b/nifi-toolkit/nifi-toolkit-flowanalyzer/pom.xml
+index 82ca82112e03..59fafe999e47 100644
+--- a/nifi-toolkit/nifi-toolkit-flowanalyzer/pom.xml
++++ b/nifi-toolkit/nifi-toolkit-flowanalyzer/pom.xml
+@@ -17,6 +17,14 @@
+     <modelVersion>4.0.0</modelVersion>
+ 
+     <artifactId>nifi-toolkit-flowanalyzer</artifactId>
++    <dependencies>
++        <dependency>
++            <groupId>org.apache.nifi</groupId>
++            <artifactId>nifi-security-utils</artifactId>
++            <version>1.12.0-SNAPSHOT</version>
++            <scope>compile</scope>
++        </dependency>
++    </dependencies>
+ 
+     <parent>
+         <groupId>org.apache.nifi</groupId>
+diff --git a/nifi-toolkit/nifi-toolkit-flowanalyzer/src/main/java/org/apache/nifi/toolkit/flowanalyzer/FlowAnalyzerDriver.java b/nifi-toolkit/nifi-toolkit-flowanalyzer/src/main/java/org/apache/nifi/toolkit/flowanalyzer/FlowAnalyzerDriver.java
+index 216f2bdc97c2..3b9a8463ac46 100644
+--- a/nifi-toolkit/nifi-toolkit-flowanalyzer/src/main/java/org/apache/nifi/toolkit/flowanalyzer/FlowAnalyzerDriver.java
++++ b/nifi-toolkit/nifi-toolkit-flowanalyzer/src/main/java/org/apache/nifi/toolkit/flowanalyzer/FlowAnalyzerDriver.java
+@@ -21,10 +21,8 @@
+ import java.math.BigDecimal;
+ import java.math.RoundingMode;
+ import java.util.zip.GZIPInputStream;
+-
+ import javax.xml.parsers.DocumentBuilder;
+-import javax.xml.parsers.DocumentBuilderFactory;
+-
++import org.apache.nifi.security.xml.XmlUtils;
+ import org.w3c.dom.Document;
+ import org.w3c.dom.Element;
+ import org.w3c.dom.Node;
+@@ -72,10 +70,8 @@ public static void main(String[] args) throws Exception {
+ 
+         System.out.println("Using flow=" + input);
+ 
+-        DocumentBuilderFactory documentBuilderFactory = DocumentBuilderFactory.newInstance();
+-        DocumentBuilder documentBuilder;
+         try {
+-            documentBuilder = documentBuilderFactory.newDocumentBuilder();
++            DocumentBuilder documentBuilder = XmlUtils.createSafeDocumentBuilder(false);
+             Document document = documentBuilder.parse(gzipStream);
+             NodeList connectionNode = document.getElementsByTagName(CONST_XMLNODE_CONNECTION);
+ 
+@@ -91,7 +87,7 @@ public static void main(String[] args) throws Exception {
+                     avg = avg.add(byteValue);
+                     String dataQueueSize = maxWorkQueueSize.getElementsByTagName("maxWorkQueueSize").item(0)
+                             .getTextContent();
+-                    Long dataQueueSizeL  = new Long(dataQueueSize);
++                    Long dataQueueSizeL  = Long.valueOf(dataQueueSize);
+                     totalQueueSize = dataQueueSizeL + totalQueueSize;
+                     if(dataQueueSizeL > maxQueueSize)
+                         maxQueueSize = dataQueueSizeL;
+@@ -125,7 +121,7 @@ public static void main(String[] args) throws Exception {
+     }
+ 
+     private static boolean helpRequested(String[] args) {
+-        return args.length == 0 || (args.length > 0 && (args[0].equalsIgnoreCase("-h") || args[0].equalsIgnoreCase("--help")));
++        return args.length == 0 || args[0].equalsIgnoreCase("-h") || args[0].equalsIgnoreCase("--help");
+     }
+ 
+     /**

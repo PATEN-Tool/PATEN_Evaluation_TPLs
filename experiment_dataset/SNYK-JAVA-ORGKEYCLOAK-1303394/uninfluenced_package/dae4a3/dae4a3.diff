@@ -1,0 +1,1274 @@
+diff --git a/services/src/main/java/org/keycloak/services/messages/Messages.java b/services/src/main/java/org/keycloak/services/messages/Messages.java
+index ec1ae3e2a09f..20e6d6ea6bf9 100755
+--- a/services/src/main/java/org/keycloak/services/messages/Messages.java
++++ b/services/src/main/java/org/keycloak/services/messages/Messages.java
+@@ -54,6 +54,8 @@ public class Messages {
+ 
+     public static final String MISSING_USERNAME = "missingUsernameMessage";
+ 
++    public static final String UPDATE_READ_ONLY_ATTRIBUTES_REJECTED = "updateReadOnlyAttributesRejectedMessage";
++
+     public static final String MISSING_PASSWORD = "missingPasswordMessage";
+ 
+     public static final String MISSING_TOTP = "missingTotpMessage";
+diff --git a/services/src/main/java/org/keycloak/services/resources/account/AccountRestService.java b/services/src/main/java/org/keycloak/services/resources/account/AccountRestService.java
+index a2077c0c59ee..6eef412bdfa3 100755
+--- a/services/src/main/java/org/keycloak/services/resources/account/AccountRestService.java
++++ b/services/src/main/java/org/keycloak/services/resources/account/AccountRestService.java
+@@ -170,6 +170,11 @@ public Response updateAccount(UserRepresentation rep) {
+             return ErrorResponse.exists(Messages.USERNAME_EXISTS);
+         if (result.hasFailureOfErrorType(Messages.EMAIL_EXISTS))
+             return ErrorResponse.exists(Messages.EMAIL_EXISTS);
++        if (!result.getErrors().isEmpty()) {
++            // Here should be possibility to somehow return all errors?
++            String firstErrorMessage = result.getErrors().get(0).getFailedValidations().get(0).getErrorType();
++            return ErrorResponse.error(firstErrorMessage, Response.Status.BAD_REQUEST);
++        }
+ 
+         try {
+             UserUpdateHelper.updateAccount(realm, user, updatedUser);
+diff --git a/services/src/main/java/org/keycloak/services/resources/admin/UserResource.java b/services/src/main/java/org/keycloak/services/resources/admin/UserResource.java
+index 0b3458bac6b2..32dfaff5951c 100755
+--- a/services/src/main/java/org/keycloak/services/resources/admin/UserResource.java
++++ b/services/src/main/java/org/keycloak/services/resources/admin/UserResource.java
+@@ -71,8 +71,16 @@
+ import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
+ import org.keycloak.services.validation.Validation;
+ import org.keycloak.storage.ReadOnlyException;
++import org.keycloak.userprofile.LegacyUserProfileProviderFactory;
++import org.keycloak.userprofile.UserProfile;
++import org.keycloak.userprofile.UserProfileProvider;
++import org.keycloak.userprofile.profile.DefaultUserProfileContext;
++import org.keycloak.userprofile.profile.representations.AccountUserRepresentationUserProfile;
+ import org.keycloak.userprofile.utils.UserUpdateHelper;
+ import org.keycloak.userprofile.profile.representations.UserRepresentationUserProfile;
++import org.keycloak.userprofile.validation.AttributeValidationResult;
++import org.keycloak.userprofile.validation.UserProfileValidationResult;
++import org.keycloak.userprofile.validation.ValidationResult;
+ import org.keycloak.utils.ProfileHelper;
+ 
+ import javax.ws.rs.BadRequestException;
+@@ -166,6 +174,10 @@ public Response updateUser(final UserRepresentation rep) {
+                 }
+             }
+ 
++            Response response = validateUserProfile(user, rep, session);
++            if (response != null) {
++                return response;
++            }
+             updateUserFromRep(user, rep, session, true);
+             RepresentationToModel.createCredentials(rep, session, realm, user, true);
+             adminEvent.operation(OperationType.UPDATE).resourcePath(session.getContext().getUri()).representation(rep).success();
+@@ -189,9 +201,27 @@ public Response updateUser(final UserRepresentation rep) {
+         }
+     }
+ 
+-    public static void updateUserFromRep(UserModel user, UserRepresentation rep, KeycloakSession session, boolean removeMissingRequiredActions) {
++    public static Response validateUserProfile(UserModel user, UserRepresentation rep, KeycloakSession session) {
++        UserProfile updatedUser = new UserRepresentationUserProfile(rep);
++        UserProfileProvider profileProvider = session.getProvider(UserProfileProvider.class, LegacyUserProfileProviderFactory.PROVIDER_ID);
++        UserProfileValidationResult result = profileProvider.validate(DefaultUserProfileContext.forUserResource(user), updatedUser);
++        if (!result.getErrors().isEmpty()) {
++            for (AttributeValidationResult attrValidation : result.getErrors()) {
++                StringBuilder s = new StringBuilder("Failed to update attribute " + attrValidation.getField() + ": ");
++                for (ValidationResult valResult : attrValidation.getFailedValidations()) {
++                    s.append(valResult.getErrorType() + ", ");
++                }
++                logger.warn(s);
++            }
++            return ErrorResponse.error("Could not update user! See server log for more details", Response.Status.BAD_REQUEST);
++        } else {
++            return null;
++        }
++    }
+ 
+-        UserUpdateHelper.updateUserResource(session.getContext().getRealm(), user, new UserRepresentationUserProfile(rep));
++    public static void updateUserFromRep(UserModel user, UserRepresentation rep, KeycloakSession session, boolean isUpdateExistingUser) {
++        boolean removeMissingRequiredActions = isUpdateExistingUser;
++        UserUpdateHelper.updateUserResource(session.getContext().getRealm(), user, new UserRepresentationUserProfile(rep), isUpdateExistingUser);
+ 
+         if (rep.isEnabled() != null) user.setEnabled(rep.isEnabled());
+         if (rep.isEmailVerified() != null) user.setEmailVerified(rep.isEmailVerified());
+diff --git a/services/src/main/java/org/keycloak/services/resources/admin/UsersResource.java b/services/src/main/java/org/keycloak/services/resources/admin/UsersResource.java
+index b1ec02c59ba8..456021452845 100755
+--- a/services/src/main/java/org/keycloak/services/resources/admin/UsersResource.java
++++ b/services/src/main/java/org/keycloak/services/resources/admin/UsersResource.java
+@@ -147,6 +147,11 @@ public Response createUser(final UserRepresentation rep) {
+         }
+ 
+         try {
++            Response response = UserResource.validateUserProfile(null, rep, session);
++            if (response != null) {
++                return response;
++            }
++
+             UserModel user = session.users().addUser(realm, username);
+ 
+             UserResource.updateUserFromRep(user, rep, session, false);
+diff --git a/services/src/main/java/org/keycloak/userprofile/LegacyUserProfileProvider.java b/services/src/main/java/org/keycloak/userprofile/LegacyUserProfileProvider.java
+index d9cbf2f1e95f..2a52c4355b54 100644
+--- a/services/src/main/java/org/keycloak/userprofile/LegacyUserProfileProvider.java
++++ b/services/src/main/java/org/keycloak/userprofile/LegacyUserProfileProvider.java
+@@ -17,6 +17,11 @@
+ 
+ package org.keycloak.userprofile;
+ 
++import java.util.Collection;
++import java.util.List;
++import java.util.regex.Pattern;
++import java.util.stream.Collectors;
++
+ import org.jboss.logging.Logger;
+ import org.keycloak.models.KeycloakSession;
+ import org.keycloak.models.RealmModel;
+@@ -32,10 +37,14 @@
+ public class LegacyUserProfileProvider implements UserProfileProvider {
+ 
+     private static final Logger logger = Logger.getLogger(LegacyUserProfileProvider.class);
+-    private KeycloakSession session;
++    private final KeycloakSession session;
++    private final Pattern readOnlyAttributes;
++    private final Pattern adminReadOnlyAttributes;
+ 
+-    public LegacyUserProfileProvider(KeycloakSession session) {
++    public LegacyUserProfileProvider(KeycloakSession session, Pattern readOnlyAttributes, Pattern adminReadOnlyAttributes) {
+         this.session = session;
++        this.readOnlyAttributes = readOnlyAttributes;
++        this.adminReadOnlyAttributes = adminReadOnlyAttributes;
+     }
+ 
+     @Override
+@@ -50,18 +59,22 @@ public UserProfileValidationResult validate(UserProfileContext updateContext, Us
+         ValidationChainBuilder builder = ValidationChainBuilder.builder();
+         switch (updateContext.getUpdateEvent()) {
+             case UserResource:
++                addReadOnlyAttributeValidators(builder, adminReadOnlyAttributes, updateContext, updatedProfile);
+                 break;
+             case IdpReview:
+                 addBasicValidators(builder, !realm.isRegistrationEmailAsUsername());
++                addReadOnlyAttributeValidators(builder, readOnlyAttributes, updateContext, updatedProfile);
+                 break;
+             case Account:
+             case RegistrationProfile:
+             case UpdateProfile:
+                 addBasicValidators(builder, !realm.isRegistrationEmailAsUsername() && realm.isEditUsernameAllowed());
++                addReadOnlyAttributeValidators(builder, readOnlyAttributes, updateContext, updatedProfile);
+                 addSessionValidators(builder);
+                 break;
+             case RegistrationUserCreation:
+                 addUserCreationValidators(builder);
++                addReadOnlyAttributeValidators(builder, readOnlyAttributes, updateContext, updatedProfile);
+                 break;
+         }
+         return new UserProfileValidationResult(builder.build().validate(updateContext,updatedProfile));
+@@ -72,16 +85,16 @@ private void addUserCreationValidators(ValidationChainBuilder builder) {
+ 
+         if (realm.isRegistrationEmailAsUsername()) {
+             builder.addAttributeValidator().forAttribute(UserModel.EMAIL)
+-                    .addValidationFunction(Messages.INVALID_EMAIL, StaticValidators.isEmailValid())
+-                    .addValidationFunction(Messages.MISSING_EMAIL, StaticValidators.isBlank())
+-                    .addValidationFunction(Messages.EMAIL_EXISTS, StaticValidators.doesEmailExist(session)).build()
++                    .addSingleAttributeValueValidationFunction(Messages.INVALID_EMAIL, StaticValidators.isEmailValid())
++                    .addSingleAttributeValueValidationFunction(Messages.MISSING_EMAIL, StaticValidators.isBlank())
++                    .addSingleAttributeValueValidationFunction(Messages.EMAIL_EXISTS, StaticValidators.doesEmailExist(session)).build()
+                     .build();
+ 
+ 
+         } else {
+             builder.addAttributeValidator().forAttribute(UserModel.USERNAME)
+-                    .addValidationFunction(Messages.MISSING_USERNAME, StaticValidators.isBlank())
+-                    .addValidationFunction(Messages.USERNAME_EXISTS,
++                    .addSingleAttributeValueValidationFunction(Messages.MISSING_USERNAME, StaticValidators.isBlank())
++                    .addSingleAttributeValueValidationFunction(Messages.USERNAME_EXISTS,
+                             (value, o) -> session.users().getUserByUsername(value, realm) == null)
+                     .build();
+         }
+@@ -90,30 +103,48 @@ private void addUserCreationValidators(ValidationChainBuilder builder) {
+     private void addBasicValidators(ValidationChainBuilder builder, boolean userNameExistsCondition) {
+ 
+         builder.addAttributeValidator().forAttribute(UserModel.USERNAME)
+-                .addValidationFunction(Messages.MISSING_USERNAME, StaticValidators.checkUsernameExists(userNameExistsCondition)).build()
++                .addSingleAttributeValueValidationFunction(Messages.MISSING_USERNAME, StaticValidators.checkUsernameExists(userNameExistsCondition)).build()
+ 
+                 .addAttributeValidator().forAttribute(UserModel.FIRST_NAME)
+-                .addValidationFunction(Messages.MISSING_FIRST_NAME, StaticValidators.isBlank()).build()
++                .addSingleAttributeValueValidationFunction(Messages.MISSING_FIRST_NAME, StaticValidators.isBlank()).build()
+ 
+                 .addAttributeValidator().forAttribute(UserModel.LAST_NAME)
+-                .addValidationFunction(Messages.MISSING_LAST_NAME, StaticValidators.isBlank()).build()
++                .addSingleAttributeValueValidationFunction(Messages.MISSING_LAST_NAME, StaticValidators.isBlank()).build()
+ 
+                 .addAttributeValidator().forAttribute(UserModel.EMAIL)
+-                .addValidationFunction(Messages.MISSING_EMAIL, StaticValidators.isBlank())
+-                .addValidationFunction(Messages.INVALID_EMAIL, StaticValidators.isEmailValid())
++                .addSingleAttributeValueValidationFunction(Messages.MISSING_EMAIL, StaticValidators.isBlank())
++                .addSingleAttributeValueValidationFunction(Messages.INVALID_EMAIL, StaticValidators.isEmailValid())
+                 .build();
+     }
+ 
+     private void addSessionValidators(ValidationChainBuilder builder) {
+         RealmModel realm = this.session.getContext().getRealm();
+         builder.addAttributeValidator().forAttribute(UserModel.USERNAME)
+-                .addValidationFunction(Messages.USERNAME_EXISTS, StaticValidators.userNameExists(session))
+-                .addValidationFunction(Messages.READ_ONLY_USERNAME, StaticValidators.isUserMutable(realm)).build()
++                .addSingleAttributeValueValidationFunction(Messages.USERNAME_EXISTS, StaticValidators.userNameExists(session))
++                .addSingleAttributeValueValidationFunction(Messages.READ_ONLY_USERNAME, StaticValidators.isUserMutable(realm)).build()
+ 
+                 .addAttributeValidator().forAttribute(UserModel.EMAIL)
+-                .addValidationFunction(Messages.EMAIL_EXISTS, StaticValidators.isEmailDuplicated(session))
+-                .addValidationFunction(Messages.USERNAME_EXISTS, StaticValidators.doesEmailExistAsUsername(session)).build()
++                .addSingleAttributeValueValidationFunction(Messages.EMAIL_EXISTS, StaticValidators.isEmailDuplicated(session))
++                .addSingleAttributeValueValidationFunction(Messages.USERNAME_EXISTS, StaticValidators.doesEmailExistAsUsername(session)).build()
+                 .build();
+     }
+ 
++    private void addReadOnlyAttributeValidators(ValidationChainBuilder builder, Pattern configuredReadOnlyAttrs, UserProfileContext updateContext, UserProfile updatedProfile) {
++        addValidatorsForAllAttributeOfUser(builder, configuredReadOnlyAttrs, updatedProfile);
++        addValidatorsForAllAttributeOfUser(builder, configuredReadOnlyAttrs, updateContext.getCurrentProfile());
++    }
++
++
++    private void addValidatorsForAllAttributeOfUser(ValidationChainBuilder builder, Pattern configuredReadOnlyAttrsPattern, UserProfile profile) {
++        if (profile == null) {
++            return;
++        }
++
++        profile.getAttributes().keySet().stream()
++                .filter(currentAttrName -> configuredReadOnlyAttrsPattern.matcher(currentAttrName).find())
++                .forEach((currentAttrName) ->
++                        builder.addAttributeValidator().forAttribute(currentAttrName)
++                                .addValidationFunction(Messages.UPDATE_READ_ONLY_ATTRIBUTES_REJECTED, StaticValidators.isAttributeUnchanged(currentAttrName)).build()
++                );
++    }
+ }
+\ No newline at end of file
+diff --git a/services/src/main/java/org/keycloak/userprofile/LegacyUserProfileProviderFactory.java b/services/src/main/java/org/keycloak/userprofile/LegacyUserProfileProviderFactory.java
+index d6b96f6fd95c..f56a2ed49cc9 100644
+--- a/services/src/main/java/org/keycloak/userprofile/LegacyUserProfileProviderFactory.java
++++ b/services/src/main/java/org/keycloak/userprofile/LegacyUserProfileProviderFactory.java
+@@ -17,6 +17,14 @@
+ 
+ package org.keycloak.userprofile;
+ 
++import java.util.ArrayList;
++import java.util.Arrays;
++import java.util.Collection;
++import java.util.List;
++import java.util.regex.Pattern;
++import java.util.stream.Collectors;
++
++import org.jboss.logging.Logger;
+ import org.keycloak.Config;
+ import org.keycloak.models.KeycloakSession;
+ import org.keycloak.models.KeycloakSessionFactory;
+@@ -26,18 +34,50 @@
+  */
+ public class LegacyUserProfileProviderFactory implements UserProfileProviderFactory {
+ 
++    private static final Logger logger = Logger.getLogger(LegacyUserProfileProviderFactory.class);
++
+     UserProfileProvider provider;
+ 
++    // Attributes, which can't be updated by user himself
++    private Pattern readOnlyAttributesPattern;
++
++    // Attributes, which can't be updated by administrator
++    private Pattern adminReadOnlyAttributesPattern;
++
++    private String[] DEFAULT_READ_ONLY_ATTRIBUTES = { "KERBEROS_PRINCIPAL", "LDAP_ID", "LDAP_ENTRY_DN", "CREATED_TIMESTAMP", "createTimestamp", "modifyTimestamp", "userCertificate", "saml.persistent.name.id.for.*", "ENABLED", "EMAIL_VERIFIED" };
++    private String[] DEFAULT_ADMIN_READ_ONLY_ATTRIBUTES = { "KERBEROS_PRINCIPAL", "LDAP_ID", "LDAP_ENTRY_DN", "CREATED_TIMESTAMP", "createTimestamp", "modifyTimestamp" };
++
+     @Override
+     public UserProfileProvider create(KeycloakSession session) {
+-        provider = new LegacyUserProfileProvider(session);
++        provider = new LegacyUserProfileProvider(session, readOnlyAttributesPattern, adminReadOnlyAttributesPattern);
+ 
+         return provider;
+     }
+ 
+     @Override
+     public void init(Config.Scope config) {
++        this.readOnlyAttributesPattern = getRegexPatternString(config, "read-only-attributes", DEFAULT_READ_ONLY_ATTRIBUTES);
++        this.adminReadOnlyAttributesPattern = getRegexPatternString(config, "admin-read-only-attributes", DEFAULT_ADMIN_READ_ONLY_ATTRIBUTES);
++    }
++
++    private Pattern getRegexPatternString(Config.Scope config, String configKey, String[] builtinReadOnlyAttributes) {
++        String[] readOnlyAttributesCfg = config.getArray(configKey);
++        List<String> readOnlyAttributes = new ArrayList<>(Arrays.asList(builtinReadOnlyAttributes));
++        if (readOnlyAttributesCfg != null) {
++            List<String> configured = Arrays.asList(readOnlyAttributesCfg);
++            logger.infof("Configured %s: %s", configKey, configured);
++            readOnlyAttributes.addAll(configured);
++        }
++
++        String regexStr = readOnlyAttributes.stream()
++                .map(configAttrName -> configAttrName.endsWith("*")
++                        ? "^" + Pattern.quote(configAttrName.substring(0, configAttrName.length() - 1)) + ".*$"
++                        : "^" + Pattern.quote(configAttrName ) + "$")
++                .collect(Collectors.joining("|"));
++        regexStr = "(?i:" + regexStr + ")";
+ 
++        logger.debugf("Regex used for %s: %s", configKey, regexStr);
++        return Pattern.compile(regexStr);
+     }
+ 
+     @Override
+diff --git a/services/src/main/java/org/keycloak/userprofile/profile/DefaultUserProfileContext.java b/services/src/main/java/org/keycloak/userprofile/profile/DefaultUserProfileContext.java
+index 9b687ac2308e..e0ae0f7bce01 100644
+--- a/services/src/main/java/org/keycloak/userprofile/profile/DefaultUserProfileContext.java
++++ b/services/src/main/java/org/keycloak/userprofile/profile/DefaultUserProfileContext.java
+@@ -60,8 +60,13 @@ public static DefaultUserProfileContext forRegistrationProfile() {
+         return new DefaultUserProfileContext(UserUpdateEvent.RegistrationProfile, null);
+     }
+ 
+-    public static DefaultUserProfileContext forUserResource(UserRepresentation rep) {
+-        return new DefaultUserProfileContext(UserUpdateEvent.UserResource, new UserRepresentationUserProfile(rep));
++    /**
++     * @param currentUser if this is null, then we're creating new user. If it is not null, we're updating existing user
++     * @return user profile context for the validation of user when called from admin REST API
++     */
++    public static DefaultUserProfileContext forUserResource(UserModel currentUser) {
++        UserProfile currentUserProfile = currentUser == null ? null : new UserModelUserProfile(currentUser);
++        return new DefaultUserProfileContext(UserUpdateEvent.UserResource, currentUserProfile);
+     }
+ 
+     @Override
+diff --git a/services/src/main/java/org/keycloak/userprofile/utils/UserUpdateHelper.java b/services/src/main/java/org/keycloak/userprofile/utils/UserUpdateHelper.java
+index 47c12eccb2fc..37c52fce2827 100644
+--- a/services/src/main/java/org/keycloak/userprofile/utils/UserUpdateHelper.java
++++ b/services/src/main/java/org/keycloak/userprofile/utils/UserUpdateHelper.java
+@@ -57,8 +57,8 @@ public static void updateAccount(RealmModel realm, UserModel user, UserProfile u
+         update(UserUpdateEvent.Account, realm, user, updatedProfile);
+     }
+ 
+-    public static void updateUserResource(RealmModel realm, UserModel user, UserProfile userRepresentationUserProfile) {
+-        update(UserUpdateEvent.UserResource, realm, user, userRepresentationUserProfile);
++    public static void updateUserResource(RealmModel realm, UserModel user, UserProfile userRepresentationUserProfile, boolean removeExistingAttributes) {
++        update(UserUpdateEvent.UserResource, realm, user, userRepresentationUserProfile.getAttributes(), removeExistingAttributes);
+     }
+ 
+     /**
+diff --git a/services/src/main/java/org/keycloak/userprofile/validation/AttributeValidatorBuilder.java b/services/src/main/java/org/keycloak/userprofile/validation/AttributeValidatorBuilder.java
+index a5ded0ca6fad..0f86febdebd8 100644
+--- a/services/src/main/java/org/keycloak/userprofile/validation/AttributeValidatorBuilder.java
++++ b/services/src/main/java/org/keycloak/userprofile/validation/AttributeValidatorBuilder.java
+@@ -35,7 +35,23 @@ public AttributeValidatorBuilder(ValidationChainBuilder validationChainBuilder)
+         this.validationChainBuilder = validationChainBuilder;
+     }
+ 
+-    public AttributeValidatorBuilder addValidationFunction(String messageKey, BiFunction<String, UserProfileContext, Boolean> validationFunction) {
++    /**
++     * This method is for validating first value of the specified attribute. It is sufficient for all the single-valued attributes
++     *
++     * @param messageKey Key of the error message to be displayed when validation fails
++     * @param validationFunction Function, which does the actual validation logic. The "String" argument is the new value of the particular attribute.
++     * @return this
++     */
++    public AttributeValidatorBuilder addSingleAttributeValueValidationFunction(String messageKey, BiFunction<String, UserProfileContext, Boolean> validationFunction) {
++        BiFunction<List<String>, UserProfileContext, Boolean> wrappedValidationFunction = (attrValues, context) -> {
++            String singleValue = attrValues == null ? null : attrValues.get(0);
++            return validationFunction.apply(singleValue, context);
++        };
++        this.validations.add(new Validator(messageKey, wrappedValidationFunction));
++        return this;
++    }
++
++    public AttributeValidatorBuilder addValidationFunction(String messageKey, BiFunction<List<String>, UserProfileContext, Boolean> validationFunction) {
+         this.validations.add(new Validator(messageKey, validationFunction));
+         return this;
+     }
+diff --git a/services/src/main/java/org/keycloak/userprofile/validation/StaticValidators.java b/services/src/main/java/org/keycloak/userprofile/validation/StaticValidators.java
+index ff75d9e93f68..7c3597cbde12 100644
+--- a/services/src/main/java/org/keycloak/userprofile/validation/StaticValidators.java
++++ b/services/src/main/java/org/keycloak/userprofile/validation/StaticValidators.java
+@@ -17,21 +17,32 @@
+ 
+ package org.keycloak.userprofile.validation;
+ 
++import org.jboss.logging.Logger;
++import org.keycloak.common.util.ObjectUtil;
+ import org.keycloak.models.KeycloakSession;
+ import org.keycloak.models.RealmModel;
+ import org.keycloak.models.UserModel;
+ import org.keycloak.services.validation.Validation;
++import org.keycloak.userprofile.LegacyUserProfileProvider;
+ import org.keycloak.userprofile.UserProfileContext;
+ 
++import java.util.List;
+ import java.util.function.BiFunction;
+ 
+ /**
++ * Functions are supposed to return:
++ * - true if validation success
++ * - false if validation fails
++ *
+  * @author <a href="mailto:markus.till@bosch.io">Markus Till</a>
+  */
+ public class StaticValidators {
++
++    private static final Logger logger = Logger.getLogger(StaticValidators.class);
++
+     public static BiFunction<String, UserProfileContext, Boolean> isBlank() {
+         return (value, context) ->
+-                !Validation.isBlank(value);
++                value==null || !Validation.isBlank(value);
+     }
+ 
+     public static BiFunction<String, UserProfileContext, Boolean> isEmailValid() {
+@@ -40,18 +51,22 @@ public static BiFunction<String, UserProfileContext, Boolean> isEmailValid() {
+     }
+ 
+     public static BiFunction<String, UserProfileContext, Boolean> userNameExists(KeycloakSession session) {
+-        return (value, context) ->
+-                !(context.getCurrentProfile() != null
+-                        && !value.equals(context.getCurrentProfile().getAttributes().getFirstAttribute(UserModel.USERNAME))
+-                        && session.users().getUserByUsername(value, session.getContext().getRealm()) != null);
++        return (value, context) -> {
++            if (Validation.isBlank(value)) return true;
++            return !(context.getCurrentProfile() != null
++                    && !value.equals(context.getCurrentProfile().getAttributes().getFirstAttribute(UserModel.USERNAME))
++                    && session.users().getUserByUsername(value, session.getContext().getRealm()) != null);
++        };
+     }
+ 
+     public static BiFunction<String, UserProfileContext, Boolean> isUserMutable(RealmModel realm) {
+-        return (value, context) ->
+-                !(!realm.isEditUsernameAllowed()
++        return (value, context) -> {
++            if (Validation.isBlank(value)) return true;
++            return !(!realm.isEditUsernameAllowed()
+                         && context.getCurrentProfile() != null
+                         && !value.equals(context.getCurrentProfile().getAttributes().getFirstAttribute(UserModel.USERNAME))
+                 );
++        };
+     }
+ 
+     public static BiFunction<String, UserProfileContext, Boolean> checkUsernameExists(boolean externalCondition) {
+@@ -62,6 +77,7 @@ public static BiFunction<String, UserProfileContext, Boolean> checkUsernameExist
+ 
+     public static BiFunction<String, UserProfileContext, Boolean> doesEmailExistAsUsername(KeycloakSession session) {
+         return (value, context) -> {
++            if (Validation.isBlank(value)) return true;
+             RealmModel realm = session.getContext().getRealm();
+             if (!realm.isDuplicateEmailsAllowed()) {
+                 UserModel userByEmail = session.users().getUserByEmail(value, realm);
+@@ -73,6 +89,7 @@ public static BiFunction<String, UserProfileContext, Boolean> doesEmailExistAsUs
+ 
+     public static BiFunction<String, UserProfileContext, Boolean> isEmailDuplicated(KeycloakSession session) {
+         return (value, context) -> {
++            if (Validation.isBlank(value)) return true;
+             RealmModel realm = session.getContext().getRealm();
+             if (!realm.isDuplicateEmailsAllowed()) {
+                 UserModel userByEmail = session.users().getUserByEmail(value, realm);
+@@ -90,4 +107,15 @@ public static BiFunction<String, UserProfileContext, Boolean> doesEmailExist(Key
+                         && session.users().getUserByEmail(value, session.getContext().getRealm()) != null);
+     }
+ 
++    public static BiFunction<List<String>, UserProfileContext, Boolean> isAttributeUnchanged(String attributeName) {
++        return (newAttrValues, context) -> {
++            List<String> existingAttrValues = context.getCurrentProfile() == null ? null : context.getCurrentProfile().getAttributes().getAttribute(attributeName);
++            boolean result = ObjectUtil.isEqualOrBothNull(newAttrValues, existingAttrValues);
++            if (!result) {
++                logger.warnf("Attempt to edit denied attribute '%s' of user '%s'", attributeName, context.getCurrentProfile() == null ? "new user" : context.getCurrentProfile().getAttributes().getFirstAttribute(UserModel.USERNAME));
++            }
++            return result;
++        };
++    }
++
+ }
+diff --git a/services/src/main/java/org/keycloak/userprofile/validation/ValidationChain.java b/services/src/main/java/org/keycloak/userprofile/validation/ValidationChain.java
+index c1a592b2b8dd..1f346a81ef6b 100644
+--- a/services/src/main/java/org/keycloak/userprofile/validation/ValidationChain.java
++++ b/services/src/main/java/org/keycloak/userprofile/validation/ValidationChain.java
+@@ -18,11 +18,11 @@
+ package org.keycloak.userprofile.validation;
+ 
+ import org.keycloak.userprofile.UserProfile;
+-import org.keycloak.userprofile.UserProfileAttributes;
+ import org.keycloak.userprofile.UserProfileContext;
+ 
+ import java.util.ArrayList;
+ import java.util.List;
++import java.util.Objects;
+ 
+ /**
+  * @author <a href="mailto:markus.till@bosch.io">Markus Till</a>
+@@ -40,16 +40,14 @@ public List<AttributeValidationResult> validate(UserProfileContext updateContext
+             List<ValidationResult> validationResults = new ArrayList<>();
+ 
+             String attributeKey = attribute.attributeKey;
+-            String attributeValue = updatedProfile.getAttributes().getFirstAttribute(attributeKey);
+-            boolean attributeChanged = false;
+-
+-            if (attributeValue != null) {
+-                attributeChanged = updateContext.getCurrentProfile() != null
+-                        && !attributeValue.equals(updateContext.getCurrentProfile().getAttributes().getFirstAttribute(attributeKey));
+-                for (Validator validator : attribute.validators) {
+-                    validationResults.add(new ValidationResult(validator.function.apply(attributeValue, updateContext), validator.errorType));
+-                }
++            List<String> attributeValues = updatedProfile.getAttributes().getAttribute(attributeKey);
++
++            List<String> existingAttrValues = updateContext.getCurrentProfile() == null ? null : updateContext.getCurrentProfile().getAttributes().getAttribute(attributeKey);
++            boolean attributeChanged = !Objects.equals(attributeValues, existingAttrValues);
++            for (Validator validator : attribute.validators) {
++                validationResults.add(new ValidationResult(validator.function.apply(attributeValues, updateContext), validator.errorType));
+             }
++
+             overallResults.add(new AttributeValidationResult(attributeKey, attributeChanged, validationResults));
+         }
+ 
+diff --git a/services/src/main/java/org/keycloak/userprofile/validation/Validator.java b/services/src/main/java/org/keycloak/userprofile/validation/Validator.java
+index f9ecf7aec182..d5840a665281 100644
+--- a/services/src/main/java/org/keycloak/userprofile/validation/Validator.java
++++ b/services/src/main/java/org/keycloak/userprofile/validation/Validator.java
+@@ -19,6 +19,7 @@
+ 
+ import org.keycloak.userprofile.UserProfileContext;
+ 
++import java.util.List;
+ import java.util.function.BiFunction;
+ 
+ /**
+@@ -26,9 +27,9 @@
+  */
+ public class Validator {
+     String errorType;
+-    BiFunction<String, UserProfileContext, Boolean> function;
++    BiFunction<List<String>, UserProfileContext, Boolean> function;
+ 
+-    public Validator(String errorType, BiFunction<String, UserProfileContext, Boolean> function) {
++    public Validator(String errorType, BiFunction<List<String>, UserProfileContext, Boolean> function) {
+         this.function = function;
+         this.errorType = errorType;
+     }
+diff --git a/services/src/test/java/org/keycloak/userprofile/validation/ValidationChainTest.java b/services/src/test/java/org/keycloak/userprofile/validation/ValidationChainTest.java
+index c302ad32c1ff..9c5c3039c1bb 100644
+--- a/services/src/test/java/org/keycloak/userprofile/validation/ValidationChainTest.java
++++ b/services/src/test/java/org/keycloak/userprofile/validation/ValidationChainTest.java
+@@ -24,9 +24,9 @@ public class ValidationChainTest {
+     public void setUp() throws Exception {
+         builder = ValidationChainBuilder.builder()
+                 .addAttributeValidator().forAttribute("FAKE_FIELD")
+-                .addValidationFunction("FAKE_FIELD_ERRORKEY", (value, updateUserProfileContext) -> !value.equals("content")).build()
++                .addSingleAttributeValueValidationFunction("FAKE_FIELD_ERRORKEY", (value, updateUserProfileContext) -> !value.equals("content")).build()
+                 .addAttributeValidator().forAttribute("firstName")
+-                .addValidationFunction("FIRST_NAME_FIELD_ERRORKEY", (value, updateUserProfileContext) -> true).build();
++                .addSingleAttributeValueValidationFunction("FIRST_NAME_FIELD_ERRORKEY", (value, updateUserProfileContext) -> true).build();
+ 
+         //default user content
+         rep.singleAttribute(UserModel.FIRST_NAME, "firstName");
+@@ -53,15 +53,15 @@ public void validate() {
+     @Test
+     public void mergedConfig() {
+         testchain = builder.addAttributeValidator().forAttribute("FAKE_FIELD")
+-                .addValidationFunction("FAKE_FIELD_ERRORKEY_1", (value, updateUserProfileContext) -> false).build()
++                .addSingleAttributeValueValidationFunction("FAKE_FIELD_ERRORKEY_1", (value, updateUserProfileContext) -> false).build()
+                 .addAttributeValidator().forAttribute("FAKE_FIELD")
+-                .addValidationFunction("FAKE_FIELD_ERRORKEY_2", (value, updateUserProfileContext) -> false).build().build();
++                .addSingleAttributeValueValidationFunction("FAKE_FIELD_ERRORKEY_2", (value, updateUserProfileContext) -> false).build().build();
+ 
+         UserProfileValidationResult results = new UserProfileValidationResult(testchain.validate(updateContext, new UserRepresentationUserProfile(rep)));
+         Assert.assertEquals(true, results.hasFailureOfErrorType("FAKE_FIELD_ERRORKEY_1"));
+         Assert.assertEquals(true, results.hasFailureOfErrorType("FAKE_FIELD_ERRORKEY_2"));
+         Assert.assertEquals(true, results.getValidationResults().stream().filter(o -> o.getField().equals("firstName")).collect(Collectors.toList()).get(0).isValid());
+-        Assert.assertEquals(false, results.hasAttributeChanged("firstName"));
++        Assert.assertEquals(true, results.hasAttributeChanged("firstName"));
+ 
+     }
+ 
+diff --git a/testsuite/integration-arquillian/servers/auth-server/jboss/common/jboss-cli/keycloak-server-subsystem.cli b/testsuite/integration-arquillian/servers/auth-server/jboss/common/jboss-cli/keycloak-server-subsystem.cli
+index 7f4bb64a1e5f..12b2f9bccd41 100644
+--- a/testsuite/integration-arquillian/servers/auth-server/jboss/common/jboss-cli/keycloak-server-subsystem.cli
++++ b/testsuite/integration-arquillian/servers/auth-server/jboss/common/jboss-cli/keycloak-server-subsystem.cli
+@@ -16,3 +16,9 @@ echo ** Adding provider **
+ 
+ echo ** Adding max-detail-length to eventsStore spi **
+ /subsystem=keycloak-server/spi=eventsStore/provider=jpa/:write-attribute(name=properties.max-detail-length,value=${keycloak.eventsStore.maxDetailLength:1000})
++
++echo ** Adding spi=userProfile with legacy-user-profile configuration of read-only attributes **
++/subsystem=keycloak-server/spi=userProfile/:add
++/subsystem=keycloak-server/spi=userProfile/provider=legacy-user-profile/:add(properties={},enabled=true)
++/subsystem=keycloak-server/spi=userProfile/provider=legacy-user-profile/:map-put(name=properties,key=read-only-attributes,value=[deniedFoo,deniedBar*,deniedSome/thing,deniedsome*thing])
++/subsystem=keycloak-server/spi=userProfile/provider=legacy-user-profile/:map-put(name=properties,key=admin-read-only-attributes,value=[deniedSomeAdmin])
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/account/AccountRestServiceReadOnlyAttributesTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/account/AccountRestServiceReadOnlyAttributesTest.java
+new file mode 100644
+index 000000000000..99252eeeef02
+--- /dev/null
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/account/AccountRestServiceReadOnlyAttributesTest.java
+@@ -0,0 +1,190 @@
++/*
++ * Copyright 2020 Red Hat, Inc. and/or its affiliates
++ * and other contributors as indicated by the @author tags.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ */
++
++package org.keycloak.testsuite.account;
++
++import java.io.IOException;
++
++import javax.ws.rs.BadRequestException;
++
++import org.jboss.logging.Logger;
++import org.junit.Assert;
++import org.junit.Test;
++import org.keycloak.admin.client.resource.UserResource;
++import org.keycloak.broker.provider.util.SimpleHttp;
++import org.keycloak.representations.account.UserRepresentation;
++import org.keycloak.representations.idm.ErrorRepresentation;
++import org.keycloak.services.messages.Messages;
++import org.keycloak.testsuite.admin.ApiUtil;
++import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude;
++
++import static org.hamcrest.Matchers.contains;
++import static org.hamcrest.Matchers.not;
++import static org.junit.Assert.assertEquals;
++import static org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude.AuthServer.QUARKUS;
++import static org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude.AuthServer.REMOTE;
++
++/**
++ * @author <a href="mailto:mposolda@redhat.com">Marek Posolda</a>
++ */
++@AuthServerContainerExclude({REMOTE, QUARKUS}) // TODO: Enable this for quarkus and hopefully for remote as well...
++public class AccountRestServiceReadOnlyAttributesTest extends AbstractRestServiceTest {
++
++    private static final Logger logger = Logger.getLogger(AccountRestServiceReadOnlyAttributesTest.class);
++
++    @Test
++    public void testUpdateProfileCannotUpdateReadOnlyAttributes() throws IOException {
++        // Denied by default
++        testAccountUpdateAttributeExpectFailure("usercertificate");
++        testAccountUpdateAttributeExpectFailure("uSErCertificate");
++        testAccountUpdateAttributeExpectFailure("KERBEROS_PRINCIPAL", true);
++
++        // Should be allowed
++        testAccountUpdateAttributeExpectSuccess("noKerberos_Principal");
++        testAccountUpdateAttributeExpectSuccess("KERBEROS_PRINCIPALno");
++
++        // Denied by default
++        testAccountUpdateAttributeExpectFailure("enabled");
++        testAccountUpdateAttributeExpectFailure("CREATED_TIMESTAMP", true);
++
++        // Should be allowed
++        testAccountUpdateAttributeExpectSuccess("saml.something");
++
++        // Denied by configuration. "deniedFoot" is allowed as there is no wildcard
++        testAccountUpdateAttributeExpectFailure("deniedfoo");
++        testAccountUpdateAttributeExpectFailure("deniedFOo");
++        testAccountUpdateAttributeExpectSuccess("deniedFoot");
++
++        // Denied by configuration. There is wildcard at the end
++        testAccountUpdateAttributeExpectFailure("deniedbar");
++        testAccountUpdateAttributeExpectFailure("deniedBAr");
++        testAccountUpdateAttributeExpectFailure("deniedBArr");
++        testAccountUpdateAttributeExpectFailure("deniedbarrier");
++
++        // Wildcard just at the end
++        testAccountUpdateAttributeExpectSuccess("nodeniedbar");
++        testAccountUpdateAttributeExpectSuccess("nodeniedBARrier");
++
++        // Wildcard at the end
++        testAccountUpdateAttributeExpectFailure("saml.persistent.name.id.for.foo");
++        testAccountUpdateAttributeExpectFailure("saml.persistent.name.id.for._foo_");
++        testAccountUpdateAttributeExpectSuccess("saml.persistent.name.idafor.foo");
++
++        // Special characters inside should be quoted
++        testAccountUpdateAttributeExpectFailure("deniedsome/thing");
++        testAccountUpdateAttributeExpectFailure("deniedsome*thing");
++        testAccountUpdateAttributeExpectSuccess("deniedsomeithing");
++
++        // Denied only for admin, but allowed for normal user
++        testAccountUpdateAttributeExpectSuccess("deniedSomeAdmin");
++    }
++
++    private void testAccountUpdateAttributeExpectFailure(String attrName) throws IOException {
++        testAccountUpdateAttributeExpectFailure(attrName, false);
++    }
++
++    private void testAccountUpdateAttributeExpectFailure(String attrName, boolean deniedForAdminAsWell) throws IOException {
++        // Attribute not yet supposed to be on the user
++        UserRepresentation user = SimpleHttp.doGet(getAccountUrl(null), httpClient).auth(tokenUtil.getToken()).asJson(UserRepresentation.class);
++        Assert.assertThat(user.getAttributes().keySet(), not(contains(attrName)));
++
++        // Assert not possible to add the attribute to the user
++        user.singleAttribute(attrName, "foo");
++        updateError(user, 400, Messages.UPDATE_READ_ONLY_ATTRIBUTES_REJECTED);
++
++        // Add the attribute to the user with admin REST (Case when we are adding new attribute)
++        UserResource adminUserResource = null;
++        org.keycloak.representations.idm.UserRepresentation adminUserRep = null;
++        try {
++            adminUserResource = ApiUtil.findUserByUsernameId(testRealm(), user.getUsername());
++            adminUserRep = adminUserResource.toRepresentation();
++            adminUserRep.singleAttribute(attrName, "foo");
++            adminUserResource.update(adminUserRep);
++            if (deniedForAdminAsWell) {
++                Assert.fail("Not expected to update attribute " + attrName + " by admin REST API");
++            }
++        } catch (BadRequestException bre) {
++            if (!deniedForAdminAsWell) {
++                Assert.fail("Was expected to update attribute " + attrName + " by admin REST API");
++            }
++            return;
++        }
++
++        // Update attribute of the user with account REST to the same value (Case when we are updating existing attribute) - should be fine as our attribute is not changed
++        user = SimpleHttp.doGet(getAccountUrl(null), httpClient).auth(tokenUtil.getToken()).asJson(UserRepresentation.class);
++        Assert.assertEquals("foo", user.getAttributes().get(attrName).get(0));
++        user.singleAttribute("someOtherAttr", "foo");
++        user = updateAndGet(user);
++
++        // Update attribute of the user with account REST (Case when we are updating existing attribute
++        user.singleAttribute(attrName, "foo-updated");
++        updateError(user, 400, Messages.UPDATE_READ_ONLY_ATTRIBUTES_REJECTED);
++
++        // Remove attribute from the user with account REST (Case when we are removing existing attribute)
++        user.getAttributes().remove(attrName);
++        updateError(user, 400, Messages.UPDATE_READ_ONLY_ATTRIBUTES_REJECTED);
++
++        // Revert with admin REST
++        adminUserRep.getAttributes().remove(attrName);
++        adminUserRep.getAttributes().remove("someOtherAttr");
++        adminUserResource.update(adminUserRep);
++    }
++
++    private void testAccountUpdateAttributeExpectSuccess(String attrName) throws IOException {
++        // Attribute not yet supposed to be on the user
++        UserRepresentation user = SimpleHttp.doGet(getAccountUrl(null), httpClient).auth(tokenUtil.getToken()).asJson(UserRepresentation.class);
++        Assert.assertThat(user.getAttributes().keySet(), not(contains(attrName)));
++
++        // Assert not possible to add the attribute to the user
++        user.singleAttribute(attrName, "foo");
++        user = updateAndGet(user);
++
++        // Update attribute of the user with account REST to the same value (Case when we are updating existing attribute) - should be fine as our attribute is not changed
++        user = SimpleHttp.doGet(getAccountUrl(null), httpClient).auth(tokenUtil.getToken()).asJson(UserRepresentation.class);
++        Assert.assertEquals("foo", user.getAttributes().get(attrName).get(0));
++        user.singleAttribute("someOtherAttr", "foo");
++        user = updateAndGet(user);
++
++        // Update attribute of the user with account REST (Case when we are updating existing attribute
++        user.singleAttribute(attrName, "foo-updated");
++        user = updateAndGet(user);
++
++        // Remove attribute from the user with account REST (Case when we are removing existing attribute)
++        user.getAttributes().remove(attrName);
++        user = updateAndGet(user);
++
++        // Revert
++        user.getAttributes().remove("foo");
++        user.getAttributes().remove("someOtherAttr");
++        user = updateAndGet(user);
++    }
++
++    private UserRepresentation updateAndGet(UserRepresentation user) throws IOException {
++        int status = SimpleHttp.doPost(getAccountUrl(null), httpClient).auth(tokenUtil.getToken()).json(user).asStatus();
++        assertEquals(204, status);
++        return SimpleHttp.doGet(getAccountUrl(null), httpClient).auth(tokenUtil.getToken()).asJson(UserRepresentation.class);
++    }
++
++
++    private void updateError(UserRepresentation user, int expectedStatus, String expectedMessage) throws IOException {
++        SimpleHttp.Response response = SimpleHttp.doPost(getAccountUrl(null), httpClient).auth(tokenUtil.getToken()).json(user).asResponse();
++        assertEquals(expectedStatus, response.getStatus());
++        assertEquals(expectedMessage, response.asJson(ErrorRepresentation.class).getErrorMessage());
++    }
++
++}
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java
+index 3f7a44465760..3819d0a5f8f8 100755
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java
+@@ -40,6 +40,7 @@
+ import org.keycloak.events.admin.OperationType;
+ import org.keycloak.events.admin.ResourceType;
+ import org.keycloak.models.Constants;
++import org.keycloak.models.LDAPConstants;
+ import org.keycloak.models.PasswordPolicy;
+ import org.keycloak.models.UserModel;
+ import org.keycloak.models.credential.OTPCredentialModel;
+@@ -85,6 +86,7 @@
+ import org.openqa.selenium.WebDriver;
+ 
+ import javax.mail.internet.MimeMessage;
++import javax.ws.rs.BadRequestException;
+ import javax.ws.rs.ClientErrorException;
+ import javax.ws.rs.NotFoundException;
+ import javax.ws.rs.core.Response;
+@@ -112,6 +114,9 @@
+ import static org.junit.Assert.assertTrue;
+ import static org.junit.Assert.fail;
+ import static org.keycloak.testsuite.Assert.assertNames;
++import static org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude.AuthServer.QUARKUS;
++import static org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude.AuthServer.REMOTE;
++
+ import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude;
+ import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude.AuthServer;
+ 
+@@ -1090,6 +1095,57 @@ public void attributes() {
+         assertNull(user1.getAttributes());
+     }
+ 
++    @Test
++    @AuthServerContainerExclude(QUARKUS) // TODO: Enable for quarkus
++    public void updateUserWithReadOnlyAttributes() {
++        // Admin is able to update "usercertificate" attribute
++        UserRepresentation user1 = new UserRepresentation();
++        user1.setUsername("user1");
++        user1.singleAttribute("usercertificate", "foo1");
++        String user1Id = createUser(user1);
++        user1 = realm.users().get(user1Id).toRepresentation();
++
++        // Update of the user should be rejected due adding the "denied" attribute LDAP_ID
++        try {
++            user1.singleAttribute("usercertificate", "foo");
++            user1.singleAttribute("saml.persistent.name.id.for.foo", "bar");
++            user1.singleAttribute(LDAPConstants.LDAP_ID, "baz");
++            updateUser(realm.users().get(user1Id), user1);
++            Assert.fail("Not supposed to successfully update user");
++        } catch (BadRequestException bre) {
++            // Expected
++        }
++
++        // The same test as before, but with the case-sensitivity used
++        try {
++            user1.getAttributes().remove(LDAPConstants.LDAP_ID);
++            user1.singleAttribute("LDap_Id", "baz");
++            updateUser(realm.users().get(user1Id), user1);
++            Assert.fail("Not supposed to successfully update user");
++        } catch (BadRequestException bre) {
++            // Expected
++        }
++
++        // Attribute "deniedSomeAdmin" was denied for administrator
++        try {
++            user1.getAttributes().remove("LDap_Id");
++            user1.singleAttribute("deniedSomeAdmin", "baz");
++            updateUser(realm.users().get(user1Id), user1);
++            Assert.fail("Not supposed to successfully update user");
++        } catch (BadRequestException bre) {
++            // Expected
++        }
++
++        // usercertificate and saml attribute are allowed by admin
++        user1.getAttributes().remove("deniedSomeAdmin");
++        updateUser(realm.users().get(user1Id), user1);
++
++        user1 = realm.users().get(user1Id).toRepresentation();
++        assertEquals("foo", user1.getAttributes().get("usercertificate").get(0));
++        assertEquals("bar", user1.getAttributes().get("saml.persistent.name.id.for.foo").get(0));
++        assertFalse(user1.getAttributes().containsKey(LDAPConstants.LDAP_ID));
++    }
++
+     @Test
+     public void testImportUserWithNullAttribute() {
+         RealmRepresentation rep = loadJson(getClass().getResourceAsStream("/import/testrealm-user-null-attr.json"), RealmRepresentation.class);
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/federation/ldap/LDAPAccountRestApiTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/federation/ldap/LDAPAccountRestApiTest.java
+index f1badb1c41af..c0d2c35091e2 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/federation/ldap/LDAPAccountRestApiTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/federation/ldap/LDAPAccountRestApiTest.java
+@@ -19,6 +19,7 @@
+ package org.keycloak.testsuite.federation.ldap;
+ 
+ import java.io.IOException;
++import java.util.ArrayList;
+ import java.util.List;
+ 
+ import com.fasterxml.jackson.core.type.TypeReference;
+@@ -33,16 +34,22 @@
+ import org.junit.Test;
+ import org.junit.runners.MethodSorters;
+ import org.keycloak.broker.provider.util.SimpleHttp;
++import org.keycloak.federation.kerberos.KerberosFederationProvider;
++import org.keycloak.models.LDAPConstants;
+ import org.keycloak.models.RealmModel;
+ import org.keycloak.models.credential.PasswordCredentialModel;
+ import org.keycloak.representations.account.UserRepresentation;
+ import org.keycloak.representations.idm.CredentialRepresentation;
++import org.keycloak.representations.idm.ErrorRepresentation;
++import org.keycloak.services.messages.Messages;
+ import org.keycloak.services.resources.account.AccountCredentialResource;
+ import org.keycloak.storage.ldap.idm.model.LDAPObject;
+ import org.keycloak.testsuite.util.LDAPRule;
+ import org.keycloak.testsuite.util.LDAPTestUtils;
+ import org.keycloak.testsuite.util.TokenUtil;
+ 
++import static org.hamcrest.Matchers.contains;
++import static org.hamcrest.Matchers.not;
+ import static org.junit.Assert.assertEquals;
+ import static org.junit.Assert.assertFalse;
+ 
+@@ -95,13 +102,71 @@ protected void afterImportTestRealm() {
+ 
+     @Test
+     public void testGetProfile() throws IOException {
+-        UserRepresentation user = SimpleHttp.doGet(getAccountUrl(null), httpClient).auth(tokenUtil.getToken()).asJson(UserRepresentation.class);
++        UserRepresentation user = getProfile();
+         assertEquals("John", user.getFirstName());
+         assertEquals("Doe", user.getLastName());
+         assertEquals("john@email.org", user.getEmail());
+         assertFalse(user.isEmailVerified());
+     }
+ 
++    @Test
++    public void testUpdateProfile() throws IOException {
++        UserRepresentation user = getProfile();
++
++        List<String> origLdapId = new ArrayList<>(user.getAttributes().get(LDAPConstants.LDAP_ID));
++        List<String> origLdapEntryDn = new ArrayList<>(user.getAttributes().get(LDAPConstants.LDAP_ENTRY_DN));
++        Assert.assertEquals(1, origLdapId.size());
++        Assert.assertEquals(1, origLdapEntryDn.size());
++        Assert.assertThat(user.getAttributes().keySet(), not(contains(KerberosFederationProvider.KERBEROS_PRINCIPAL)));
++
++        // Trying to add KERBEROS_PRINCIPAL should fail (Adding attribute, which was not yet present)
++        user.setFirstName("JohnUpdated");
++        user.setLastName("DoeUpdated");
++        user.singleAttribute(KerberosFederationProvider.KERBEROS_PRINCIPAL, "foo");
++        updateProfileExpectError(user, 400, Messages.UPDATE_READ_ONLY_ATTRIBUTES_REJECTED);
++
++        // The same test, but consider case sensitivity
++        user.getAttributes().remove(KerberosFederationProvider.KERBEROS_PRINCIPAL);
++        user.singleAttribute("KERberos_principal", "foo");
++        updateProfileExpectError(user, 400, Messages.UPDATE_READ_ONLY_ATTRIBUTES_REJECTED);
++
++        // Trying to update LDAP_ID should fail (Updating existing attribute, which was present)
++        user.getAttributes().remove("KERberos_principal");
++        user.setFirstName("JohnUpdated");
++        user.setLastName("DoeUpdated");
++        user.getAttributes().get(LDAPConstants.LDAP_ID).remove(0);
++        user.getAttributes().get(LDAPConstants.LDAP_ID).add("123");
++        updateProfileExpectError(user, 400, Messages.UPDATE_READ_ONLY_ATTRIBUTES_REJECTED);
++
++        // Trying to delete LDAP_ID should fail (Removing attribute, which was present here already)
++        user.getAttributes().get(LDAPConstants.LDAP_ID).remove(0);
++        updateProfileExpectError(user, 400, Messages.UPDATE_READ_ONLY_ATTRIBUTES_REJECTED);
++
++        user.getAttributes().remove(LDAPConstants.LDAP_ID);
++        updateProfileExpectError(user, 400, Messages.UPDATE_READ_ONLY_ATTRIBUTES_REJECTED);
++
++        // Trying to update LDAP_ENTRY_DN should fail
++        user.getAttributes().put(LDAPConstants.LDAP_ID, origLdapId);
++        user.getAttributes().get(LDAPConstants.LDAP_ENTRY_DN).remove(0);
++        user.getAttributes().get(LDAPConstants.LDAP_ENTRY_DN).add("ou=foo,dc=bar");
++        updateProfileExpectError(user, 400, Messages.UPDATE_READ_ONLY_ATTRIBUTES_REJECTED);
++
++        // Update firstName and lastName should be fine
++        user.getAttributes().put(LDAPConstants.LDAP_ENTRY_DN, origLdapEntryDn);
++        updateProfileExpectSuccess(user);
++
++        user = getProfile();
++        assertEquals("JohnUpdated", user.getFirstName());
++        assertEquals("DoeUpdated", user.getLastName());
++        assertEquals(origLdapId, user.getAttributes().get(LDAPConstants.LDAP_ID));
++        assertEquals(origLdapEntryDn, user.getAttributes().get(LDAPConstants.LDAP_ENTRY_DN));
++
++        // Revert
++        user.setFirstName("John");
++        user.setLastName("Doe");
++        updateProfileExpectSuccess(user);
++    }
++
+     @Test
+     public void testGetCredentials() throws IOException {
+         List<AccountCredentialResource.CredentialContainer> credentials = getCredentials();
+@@ -120,7 +185,7 @@ public void testGetCredentials() throws IOException {
+ 
+ 
+     @Test
+-    public void testUpdateProfile() throws IOException {
++    public void testUpdateProfileSimple() throws IOException {
+         testingClient.server().run(session -> {
+             LDAPTestContext ctx = LDAPTestContext.init(session);
+             RealmModel appRealm = ctx.getRealm();
+@@ -148,6 +213,21 @@ private String getAccountUrl(String resource) {
+         return suiteContext.getAuthServerInfo().getContextRoot().toString() + "/auth/realms/test/account" + (resource != null ? "/" + resource : "");
+     }
+ 
++    private UserRepresentation getProfile() throws IOException {
++        return SimpleHttp.doGet(getAccountUrl(null), httpClient).auth(tokenUtil.getToken()).asJson(UserRepresentation.class);
++    }
++
++    private void updateProfileExpectSuccess(UserRepresentation user) throws IOException {
++        int status = SimpleHttp.doPost(getAccountUrl(null), httpClient).auth(tokenUtil.getToken()).json(user).asStatus();
++        assertEquals(204, status);
++    }
++
++    private void updateProfileExpectError(UserRepresentation user, int expectedStatus, String expectedMessage) throws IOException {
++        SimpleHttp.Response response = SimpleHttp.doPost(getAccountUrl(null), httpClient).auth(tokenUtil.getToken()).json(user).asResponse();
++        assertEquals(expectedStatus, response.getStatus());
++        assertEquals(expectedMessage, response.asJson(ErrorRepresentation.class).getErrorMessage());
++    }
++
+     // Send REST request to get all credential containers and credentials of current user
+     private List<AccountCredentialResource.CredentialContainer> getCredentials() throws IOException {
+         return SimpleHttp.doGet(getAccountUrl("credentials"), httpClient)
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/federation/ldap/LDAPAdminRestApiTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/federation/ldap/LDAPAdminRestApiTest.java
+new file mode 100644
+index 000000000000..15fac62730ae
+--- /dev/null
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/federation/ldap/LDAPAdminRestApiTest.java
+@@ -0,0 +1,205 @@
++/*
++ * Copyright 2020 Red Hat, Inc. and/or its affiliates
++ * and other contributors as indicated by the @author tags.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ *
++ */
++
++package org.keycloak.testsuite.federation.ldap;
++
++import java.util.ArrayList;
++import java.util.List;
++
++import javax.ws.rs.BadRequestException;
++import javax.ws.rs.core.Response;
++
++import org.junit.Assert;
++import org.junit.ClassRule;
++import org.junit.FixMethodOrder;
++import org.junit.Test;
++import org.junit.runners.MethodSorters;
++import org.keycloak.admin.client.resource.UserResource;
++import org.keycloak.federation.kerberos.KerberosFederationProvider;
++import org.keycloak.models.LDAPConstants;
++import org.keycloak.models.RealmModel;
++import org.keycloak.representations.idm.UserRepresentation;
++import org.keycloak.storage.ldap.idm.model.LDAPObject;
++import org.keycloak.testsuite.admin.ApiUtil;
++import org.keycloak.testsuite.util.LDAPRule;
++import org.keycloak.testsuite.util.LDAPTestUtils;
++import org.keycloak.testsuite.util.UserBuilder;
++
++import static org.hamcrest.Matchers.not;
++import static org.hamcrest.Matchers.contains;
++import static org.junit.Assert.assertEquals;
++
++/**
++ *
++ * @author <a href="mailto:mposolda@redhat.com">Marek Posolda</a>
++ */
++@FixMethodOrder(MethodSorters.NAME_ASCENDING)
++public class LDAPAdminRestApiTest extends AbstractLDAPTest {
++
++    @ClassRule
++    public static LDAPRule ldapRule = new LDAPRule();
++
++    @Override
++    protected LDAPRule getLDAPRule() {
++        return ldapRule;
++    }
++
++    @Override
++    protected void afterImportTestRealm() {
++        testingClient.server().run(session -> {
++            LDAPTestContext ctx = LDAPTestContext.init(session);
++            RealmModel appRealm = ctx.getRealm();
++
++            LDAPTestUtils.addLocalUser(session, appRealm, "marykeycloak", "mary@test.com", "password-app");
++
++            LDAPTestUtils.addZipCodeLDAPMapper(appRealm, ctx.getLdapModel());
++
++            // Delete all LDAP users and add some new for testing
++            LDAPTestUtils.removeAllLDAPUsers(ctx.getLdapProvider(), appRealm);
++
++            LDAPObject john = LDAPTestUtils.addLDAPUser(ctx.getLdapProvider(), appRealm, "johnkeycloak", "John", "Doe", "john@email.org", null, "1234");
++            LDAPTestUtils.updateLDAPPassword(ctx.getLdapProvider(), john, "Password1");
++        });
++    }
++
++    @Test
++    public void createUserWithAdminRest() throws Exception {
++        // Create user just with the username
++        UserRepresentation user1 = UserBuilder.create()
++                .username("admintestuser1")
++                .password("userpass")
++                .enabled(true)
++                .build();
++        String newUserId1 = createUserExpectSuccess(user1);
++        getCleanup().addUserId(newUserId1);
++
++        // Create user with firstName and lastNAme
++        UserRepresentation user2 = UserBuilder.create()
++                .username("admintestuser2")
++                .password("userpass")
++                .email("admintestuser2@keycloak.org")
++                .firstName("Some")
++                .lastName("OtherUser")
++                .enabled(true)
++                .build();
++        String newUserId2 = createUserExpectSuccess(user2);
++        getCleanup().addUserId(newUserId2);
++
++        // Create user with filled LDAP_ID should fail
++        UserRepresentation user3 = UserBuilder.create()
++                .username("admintestuser3")
++                .password("userpass")
++                .addAttribute(LDAPConstants.LDAP_ID, "123456")
++                .enabled(true)
++                .build();
++        createUserExpectError(user3);
++
++        // Create user with filled LDAP_ENTRY_DN should fail
++        UserRepresentation user4 = UserBuilder.create()
++                .username("admintestuser4")
++                .password("userpass")
++                .addAttribute(LDAPConstants.LDAP_ENTRY_DN, "ou=users,dc=foo")
++                .enabled(true)
++                .build();
++        createUserExpectError(user4);
++    }
++
++    @Test
++    public void updateUserWithAdminRest() throws Exception {
++        UserResource userRes = ApiUtil.findUserByUsernameId(testRealm(), "johnkeycloak");
++        UserRepresentation user = userRes.toRepresentation();
++
++        List<String> origLdapId = new ArrayList<>(user.getAttributes().get(LDAPConstants.LDAP_ID));
++        List<String> origLdapEntryDn = new ArrayList<>(user.getAttributes().get(LDAPConstants.LDAP_ENTRY_DN));
++        Assert.assertEquals(1, origLdapId.size());
++        Assert.assertEquals(1, origLdapEntryDn.size());
++        Assert.assertThat(user.getAttributes().keySet(), not(contains(KerberosFederationProvider.KERBEROS_PRINCIPAL)));
++
++        // Trying to add KERBEROS_PRINCIPAL should fail (Adding attribute, which was not yet present)
++        user.setFirstName("JohnUpdated");
++        user.setLastName("DoeUpdated");
++        user.singleAttribute(KerberosFederationProvider.KERBEROS_PRINCIPAL, "foo");
++        updateUserExpectError(userRes, user);
++
++        // The same test, but consider case sensitivity
++        user.getAttributes().remove(KerberosFederationProvider.KERBEROS_PRINCIPAL);
++        user.singleAttribute("KERberos_principal", "foo");
++        updateUserExpectError(userRes, user);
++
++        // Trying to update LDAP_ID should fail (Updating existing attribute, which was present)
++        user.getAttributes().remove("KERberos_principal");
++        user.getAttributes().get(LDAPConstants.LDAP_ID).remove(0);
++        user.getAttributes().get(LDAPConstants.LDAP_ID).add("123");
++        updateUserExpectError(userRes, user);
++
++        // Trying to delete LDAP_ID should fail (Removing attribute, which was present here already)
++        user.getAttributes().get(LDAPConstants.LDAP_ID).remove(0);
++        updateUserExpectError(userRes, user);
++
++        user.getAttributes().remove(LDAPConstants.LDAP_ID);
++        updateUserExpectError(userRes, user);
++
++        // Trying to update LDAP_ENTRY_DN should fail
++        user.getAttributes().put(LDAPConstants.LDAP_ID, origLdapId);
++        user.getAttributes().get(LDAPConstants.LDAP_ENTRY_DN).remove(0);
++        user.getAttributes().get(LDAPConstants.LDAP_ENTRY_DN).add("ou=foo,dc=bar");
++        updateUserExpectError(userRes, user);
++
++        // Update firstName and lastName should be fine
++        user.getAttributes().put(LDAPConstants.LDAP_ENTRY_DN, origLdapEntryDn);
++        userRes.update(user);
++
++        user = userRes.toRepresentation();
++        assertEquals("JohnUpdated", user.getFirstName());
++        assertEquals("DoeUpdated", user.getLastName());
++        assertEquals(origLdapId, user.getAttributes().get(LDAPConstants.LDAP_ID));
++        assertEquals(origLdapEntryDn, user.getAttributes().get(LDAPConstants.LDAP_ENTRY_DN));
++
++        // Revert
++        user.setFirstName("John");
++        user.setLastName("Doe");
++        userRes.update(user);
++    }
++
++
++    private String createUserExpectSuccess(UserRepresentation user) {
++        Response response = testRealm().users().create(user);
++        String newUserId = ApiUtil.getCreatedId(response);
++        response.close();
++
++        UserRepresentation userRep = testRealm().users().get(newUserId).toRepresentation();
++        userRep.getAttributes().containsKey(LDAPConstants.LDAP_ID);
++        userRep.getAttributes().containsKey(LDAPConstants.LDAP_ENTRY_DN);
++        return newUserId;
++    }
++
++    private void createUserExpectError(UserRepresentation user) {
++        Response response = testRealm().users().create(user);
++        Assert.assertEquals(400, response.getStatus());
++        response.close();
++    }
++
++    private void updateUserExpectError(UserResource userRes, UserRepresentation user) {
++        try {
++            userRes.update(user);
++            Assert.fail("Not expected to successfully update user");
++        } catch (BadRequestException e) {
++            // Expected
++        }
++    }
++}
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/resources/META-INF/keycloak-server.json b/testsuite/integration-arquillian/tests/base/src/test/resources/META-INF/keycloak-server.json
+index 072de26ab3ee..4576e5a2c3f9 100755
+--- a/testsuite/integration-arquillian/tests/base/src/test/resources/META-INF/keycloak-server.json
++++ b/testsuite/integration-arquillian/tests/base/src/test/resources/META-INF/keycloak-server.json
+@@ -194,6 +194,13 @@
+ 	}
+     },
+ 
++    "userProfile": {
++        "legacy-user-profile": {
++            "read-only-attributes": [ "deniedFoo", "deniedBar*", "deniedSome/thing", "deniedsome*thing" ],
++            "admin-read-only-attributes": [ "deniedSomeAdmin" ]
++        }
++    },
++
+     "x509cert-lookup": {
+         "provider": "${keycloak.x509cert.lookup.provider:default}",
+         "default": {
+diff --git a/testsuite/utils/src/main/resources/META-INF/keycloak-server.json b/testsuite/utils/src/main/resources/META-INF/keycloak-server.json
+index c3c249b23e52..ee2d9ea5d7a1 100755
+--- a/testsuite/utils/src/main/resources/META-INF/keycloak-server.json
++++ b/testsuite/utils/src/main/resources/META-INF/keycloak-server.json
+@@ -112,6 +112,13 @@
+         }
+     },
+ 
++    "userProfile": {
++        "legacy-user-profile": {
++            "read-only-attributes": [ "deniedFoo", "deniedBar*", "deniedSome/thing", "deniedsome*thing" ],
++            "admin-read-only-attributes": [ "deniedSomeAdmin" ]
++        }
++    },
++
+     "x509cert-lookup": {
+         "provider": "${keycloak.x509cert.lookup.provider:}",
+         "haproxy": {
+diff --git a/themes/src/main/resources/theme/base/account/messages/messages_en.properties b/themes/src/main/resources/theme/base/account/messages/messages_en.properties
+index 3b9bd6e249ef..c97c18184635 100755
+--- a/themes/src/main/resources/theme/base/account/messages/messages_en.properties
++++ b/themes/src/main/resources/theme/base/account/messages/messages_en.properties
+@@ -171,6 +171,7 @@ missingEmailMessage=Please specify email.
+ missingPasswordMessage=Please specify password.
+ notMatchPasswordMessage=Passwords don''t match.
+ invalidUserMessage=Invalid user
++updateReadOnlyAttributesRejectedMessage=Update of read-only attribute rejected
+ 
+ missingTotpMessage=Please specify authenticator code.
+ missingTotpDeviceNameMessage=Please specify device name.

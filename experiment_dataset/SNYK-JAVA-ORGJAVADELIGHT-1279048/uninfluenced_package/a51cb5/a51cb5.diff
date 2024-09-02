@@ -1,0 +1,76 @@
+diff --git a/src/main/java/delight/nashornsandbox/internal/NashornSandboxImpl.java b/src/main/java/delight/nashornsandbox/internal/NashornSandboxImpl.java
+index 614d40d..c925e07 100644
+--- a/src/main/java/delight/nashornsandbox/internal/NashornSandboxImpl.java
++++ b/src/main/java/delight/nashornsandbox/internal/NashornSandboxImpl.java
+@@ -148,8 +148,6 @@ private void produceSecureBindings() {
+                     sb.append("var $ARG=null;var $ENV=null;var $EXEC=null;");
+                     sb.append("var $OPTIONS=null;var $OUT=null;var $ERR=null;var $EXIT=null;");
+                 }
+-                sb.append("this.engine = null;");
+-                sb.append("delete this.__noSuchProperty__;");
+                 scriptEngine.eval(sb.toString());
+ 
+                 resetEngineBindings();
+@@ -208,7 +206,17 @@ public Object eval(final String js, final ScriptContext scriptContext, final Bin
+ 			throws ScriptCPUAbuseException, ScriptException {
+ 	    produceSecureBindings(); // We need this here for bindings
+ 		final JsSanitizer sanitizer = getSanitizer();
+-		final String securedJs = sanitizer.secureJs(js);
++		// see https://github.com/javadelight/delight-nashorn-sandbox/issues/73
++		final String blockAccessToEngine = "Object.defineProperty(this, 'engine', {});" + 
++        		"Object.defineProperty(this, 'context', {});delete this.__noSuchProperty__;";
++		final String securedJs;
++		if (scriptContext == null) {
++			securedJs = blockAccessToEngine+sanitizer.secureJs(js);
++		} else {
++			// Unfortunately, blocking access to the engine property inteferes with setting a script context
++			// needs further investigation
++			securedJs = sanitizer.secureJs(js);
++		}
+         final Bindings securedBindings = secureBindings(bindings);
+         EvaluateOperation op = new EvaluateOperation(securedJs, scriptContext, securedBindings);
+         return executeSandboxedOperation(op);
+diff --git a/src/test/java/delight/nashornsandbox/TestEngine.java b/src/test/java/delight/nashornsandbox/TestEngine.java
+index d936b36..7305fb2 100644
+--- a/src/test/java/delight/nashornsandbox/TestEngine.java
++++ b/src/test/java/delight/nashornsandbox/TestEngine.java
+@@ -2,7 +2,6 @@
+ 
+ import javax.script.ScriptException;
+ 
+-import org.junit.Ignore;
+ import org.junit.Test;
+ 
+ import delight.nashornsandbox.exceptions.ScriptCPUAbuseException;
+@@ -10,23 +9,25 @@
+ 
+ public class TestEngine {
+ 	
+-	@Test
++	
++	@Test(expected = ScriptException.class)
+ 	public void test() throws ScriptCPUAbuseException, ScriptException {
+ 		
+ 		NashornSandbox sandbox = NashornSandboxes.create();
+ 		
+-		Assert.assertEquals(null, sandbox.eval("this.engine"));
++		Assert.assertEquals(null, sandbox.eval("this.engine.factory"));
+ 		
+ 	}
+ 	
+-	@Ignore
+-	@Test
++	
++	@Test(expected = ScriptException.class)
+ 	public void test_with_delete() throws ScriptCPUAbuseException, ScriptException {
+ 		
+ 		NashornSandbox sandbox = NashornSandboxes.create();
+-		
++		 sandbox.eval("Object.defineProperty(this, 'engine', {});\n" + 
++         		"Object.defineProperty(this, 'context', {});");
++         sandbox.eval("delete this.__noSuchProperty__;");
+ 		sandbox.eval("delete this.engine; this.engine.factory;");
+-		// should fail but doesn't
+ 		sandbox.eval("delete this.engine; this.engine.factory.scriptEngine.compile('var File = Java.type(\"java.io.File\"); File;').eval()");
+ 		
+ 		Assert.assertEquals(null, sandbox.eval("delete this.engine; this.engine.factory;"));

@@ -1,0 +1,34 @@
+diff --git a/services/src/main/java/org/keycloak/theme/FolderTheme.java b/services/src/main/java/org/keycloak/theme/FolderTheme.java
+index f15bddbf332b..28a1c1120127 100644
+--- a/services/src/main/java/org/keycloak/theme/FolderTheme.java
++++ b/services/src/main/java/org/keycloak/theme/FolderTheme.java
+@@ -93,7 +93,7 @@ public InputStream getResourceAsStream(String path) throws IOException {
+         }
+ 
+         File file = new File(resourcesDir, path);
+-        if (!file.isFile() || !file.getCanonicalPath().startsWith(resourcesDir.getCanonicalPath())) {
++        if (!file.isFile() || !file.getCanonicalPath().startsWith(resourcesDir.getCanonicalPath() + File.separator)) {
+             return null;
+         } else {
+             return file.toURI().toURL().openStream();
+diff --git a/services/src/main/java/org/keycloak/theme/FolderThemeProvider.java b/services/src/main/java/org/keycloak/theme/FolderThemeProvider.java
+index 5c75f56f2be0..1ea3123af8a3 100755
+--- a/services/src/main/java/org/keycloak/theme/FolderThemeProvider.java
++++ b/services/src/main/java/org/keycloak/theme/FolderThemeProvider.java
+@@ -84,7 +84,15 @@ public void close() {
+     }
+ 
+     private File getThemeDir(String name, Theme.Type type) {
+-        return new File(themesDir, name + File.separator + type.name().toLowerCase());
++        File f = new File(themesDir, name + File.separator + type.name().toLowerCase());
++        try {
++            if (!f.getCanonicalPath().startsWith(themesDir.getCanonicalPath() + File.separator)) {
++                return null;
++            }
++        } catch (IOException e) {
++            return null;
++        }
++        return f;
+     }
+ 
+ }

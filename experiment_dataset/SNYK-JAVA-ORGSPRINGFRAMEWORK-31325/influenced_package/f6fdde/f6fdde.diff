@@ -1,0 +1,31 @@
+diff --git a/spring-core/src/main/java/org/springframework/util/StringUtils.java b/spring-core/src/main/java/org/springframework/util/StringUtils.java
+index 7fa4b75cf9d7..f7e59ca746ec 100644
+--- a/spring-core/src/main/java/org/springframework/util/StringUtils.java
++++ b/spring-core/src/main/java/org/springframework/util/StringUtils.java
+@@ -621,7 +621,12 @@ public static String cleanPath(String path) {
+ 		String prefix = "";
+ 		if (prefixIndex != -1) {
+ 			prefix = pathToUse.substring(0, prefixIndex + 1);
+-			pathToUse = pathToUse.substring(prefixIndex + 1);
++			if (prefix.contains("/")) {
++				prefix = "";
++			}
++			else {
++				pathToUse = pathToUse.substring(prefixIndex + 1);
++			}
+ 		}
+ 		if (pathToUse.startsWith(FOLDER_SEPARATOR)) {
+ 			prefix = prefix + FOLDER_SEPARATOR;
+diff --git a/spring-core/src/test/java/org/springframework/util/StringUtilsTests.java b/spring-core/src/test/java/org/springframework/util/StringUtilsTests.java
+index b366ed7f96d0..c362a92ed529 100644
+--- a/spring-core/src/test/java/org/springframework/util/StringUtilsTests.java
++++ b/spring-core/src/test/java/org/springframework/util/StringUtilsTests.java
+@@ -299,6 +299,8 @@ public void testCleanPath() {
+ 		assertEquals("../mypath/myfile", StringUtils.cleanPath("../mypath/../mypath/myfile"));
+ 		assertEquals("../mypath/myfile", StringUtils.cleanPath("mypath/../../mypath/myfile"));
+ 		assertEquals("/../mypath/myfile", StringUtils.cleanPath("/../mypath/myfile"));
++		assertEquals("/mypath/myfile", StringUtils.cleanPath("/a/:b/../../mypath/myfile"));
++		assertEquals("file:///c:/path/to/the%20file.txt", StringUtils.cleanPath("file:///c:/some/../path/to/the%20file.txt"));
+ 	}
+ 
+ 	public void testPathEquals() {

@@ -1,0 +1,709 @@
+diff --git a/jetty-http/src/main/java/org/eclipse/jetty/http/HttpURI.java b/jetty-http/src/main/java/org/eclipse/jetty/http/HttpURI.java
+index bc6866ba0b52..730021871333 100644
+--- a/jetty-http/src/main/java/org/eclipse/jetty/http/HttpURI.java
++++ b/jetty-http/src/main/java/org/eclipse/jetty/http/HttpURI.java
+@@ -52,6 +52,7 @@ enum Ambiguous
+     {
+         SEGMENT,
+         SEPARATOR,
++        ENCODING,
+         PARAM
+     }
+ 
+@@ -159,6 +160,11 @@ static Immutable from(String scheme, String host, int port, String pathQuery)
+      */
+     boolean hasAmbiguousParameter();
+ 
++    /**
++     * @return True if the URI has an encoded '%' character.
++     */
++    boolean hasAmbiguousEncoding();
++
+     default URI toURI()
+     {
+         try
+@@ -386,6 +392,12 @@ public boolean hasAmbiguousParameter()
+             return _ambiguous.contains(Ambiguous.PARAM);
+         }
+ 
++        @Override
++        public boolean hasAmbiguousEncoding()
++        {
++            return _ambiguous.contains(Ambiguous.ENCODING);
++        }
++
+         @Override
+         public String toString()
+         {
+@@ -727,6 +739,12 @@ public boolean hasAmbiguousParameter()
+             return _ambiguous.contains(Ambiguous.PARAM);
+         }
+ 
++        @Override
++        public boolean hasAmbiguousEncoding()
++        {
++            return _ambiguous.contains(Ambiguous.ENCODING);
++        }
++
+         public Mutable normalize()
+         {
+             HttpScheme scheme = _scheme == null ? null : HttpScheme.CACHE.get(_scheme);
+@@ -884,7 +902,7 @@ private void parse(State state, final String uri)
+             int segment = 0; // the start of the current segment within the path
+             boolean encoded = false; // set to true if the path contains % encoded characters
+             boolean dot = false; // set to true if the path containers . or .. segments
+-            int escapedSlash = 0; // state of parsing a %2f
++            int escapedTwo = 0; // state of parsing a %2<x>
+             int end = uri.length();
+             for (int i = 0; i < end; i++)
+             {
+@@ -920,7 +938,7 @@ private void parse(State state, final String uri)
+                                 break;
+                             case '%':
+                                 encoded = true;
+-                                escapedSlash = 1;
++                                escapedTwo = 1;
+                                 mark = pathMark = segment = i;
+                                 state = State.PATH;
+                                 break;
+@@ -972,7 +990,7 @@ private void parse(State state, final String uri)
+                             case '%':
+                                 // must have be in an encoded path
+                                 encoded = true;
+-                                escapedSlash = 1;
++                                escapedTwo = 1;
+                                 state = State.PATH;
+                                 break;
+                             case '#':
+@@ -1120,19 +1138,24 @@ else if (c == '/')
+                                 break;
+                             case '%':
+                                 encoded = true;
+-                                escapedSlash = 1;
++                                escapedTwo = 1;
+                                 break;
+                             case '2':
+-                                escapedSlash = escapedSlash == 1 ? 2 : 0;
++                                escapedTwo = escapedTwo == 1 ? 2 : 0;
+                                 break;
+                             case 'f':
+                             case 'F':
+-                                if (escapedSlash == 2)
++                                if (escapedTwo == 2)
+                                     _ambiguous.add(Ambiguous.SEPARATOR);
+-                                escapedSlash = 0;
++                                escapedTwo = 0;
++                                break;
++                            case '5':
++                                if (escapedTwo == 2)
++                                    _ambiguous.add(Ambiguous.ENCODING);
++                                escapedTwo = 0;
+                                 break;
+                             default:
+-                                escapedSlash = 0;
++                                escapedTwo = 0;
+                                 break;
+                         }
+                         break;
+@@ -1266,4 +1289,4 @@ else if (param && ambiguous == Boolean.FALSE)
+             }
+         }
+     }
+-}
+\ No newline at end of file
++}
+diff --git a/jetty-http/src/main/java/org/eclipse/jetty/http/UriCompliance.java b/jetty-http/src/main/java/org/eclipse/jetty/http/UriCompliance.java
+index 0eb0d557ddd1..cddb35dc3af3 100644
+--- a/jetty-http/src/main/java/org/eclipse/jetty/http/UriCompliance.java
++++ b/jetty-http/src/main/java/org/eclipse/jetty/http/UriCompliance.java
+@@ -58,6 +58,10 @@ public enum Violation implements ComplianceViolation
+          * Allow ambiguous path parameters within a URI segment e.g. <code>/foo/..;/bar</code>
+          */
+         AMBIGUOUS_PATH_PARAMETER("https://tools.ietf.org/html/rfc3986#section-3.3", "Ambiguous URI path parameter"),
++        /**
++         * Allow ambiguous path encoding within a URI segment e.g. <code>/%2557EB-INF</code>
++         */
++        AMBIGUOUS_PATH_ENCODING("https://tools.ietf.org/html/rfc3986#section-3.3", "Ambiguous URI path encoding"),
+         /**
+          * Allow Non canonical ambiguous paths. eg <code>/foo/x%2f%2e%2e%/bar</code> provided to applications as <code>/foo/x/../bar</code>
+          */
+@@ -94,15 +98,15 @@ public String getDescription()
+     /**
+      * The default compliance mode that extends RFC3986 compliance with additional violations to avoid most ambiguous URIs.
+      * This mode does allow {@link Violation#AMBIGUOUS_PATH_SEPARATOR}, but disallows
+-     * {@link Violation#AMBIGUOUS_PATH_PARAMETER} and {@link Violation#AMBIGUOUS_PATH_SEGMENT}.
++     * {@link Violation#AMBIGUOUS_PATH_PARAMETER}, {@link Violation#AMBIGUOUS_PATH_SEGMENT} and {@link Violation#AMBIGUOUS_PATH_ENCODING}.
+      * Ambiguous paths are not allowed by {@link Violation#NON_CANONICAL_AMBIGUOUS_PATHS}.
+      */
+     public static final UriCompliance DEFAULT = new UriCompliance("DEFAULT", of(Violation.AMBIGUOUS_PATH_SEPARATOR));
+ 
+     /**
+-     * LEGACY compliance mode that models Jetty-9.4 behavior by allowing {@link Violation#AMBIGUOUS_PATH_SEGMENT} and {@link Violation#AMBIGUOUS_PATH_SEPARATOR}
++     * LEGACY compliance mode that models Jetty-9.4 behavior by allowing {@link Violation#AMBIGUOUS_PATH_SEGMENT}, {@link Violation#AMBIGUOUS_PATH_SEPARATOR} and {@link Violation#AMBIGUOUS_PATH_ENCODING}.
+      */
+-    public static final UriCompliance LEGACY = new UriCompliance("LEGACY", of(Violation.AMBIGUOUS_PATH_SEGMENT, Violation.AMBIGUOUS_PATH_SEPARATOR));
++    public static final UriCompliance LEGACY = new UriCompliance("LEGACY", of(Violation.AMBIGUOUS_PATH_SEGMENT, Violation.AMBIGUOUS_PATH_SEPARATOR, Violation.AMBIGUOUS_PATH_ENCODING));
+ 
+     /**
+      * Compliance mode that exactly follows RFC3986, including allowing all additional ambiguous URI Violations,
+diff --git a/jetty-server/src/main/java/org/eclipse/jetty/server/Request.java b/jetty-server/src/main/java/org/eclipse/jetty/server/Request.java
+index 95866fb99104..997dcf2acb6c 100644
+--- a/jetty-server/src/main/java/org/eclipse/jetty/server/Request.java
++++ b/jetty-server/src/main/java/org/eclipse/jetty/server/Request.java
+@@ -1702,6 +1702,8 @@ public void setMetaData(MetaData.Request request)
+                 throw new BadMessageException("Ambiguous segment in URI");
+             if (uri.hasAmbiguousParameter() && (compliance == null || !compliance.allows(UriCompliance.Violation.AMBIGUOUS_PATH_PARAMETER)))
+                 throw new BadMessageException("Ambiguous path parameter in URI");
++            if (uri.hasAmbiguousEncoding() && (compliance == null || !compliance.allows(UriCompliance.Violation.AMBIGUOUS_PATH_ENCODING)))
++                throw new BadMessageException("Ambiguous path encoding in URI");
+         }
+ 
+         if (uri.isAbsolute() && uri.hasAuthority() && uri.getPath() != null)
+diff --git a/jetty-server/src/main/java/org/eclipse/jetty/server/ResourceService.java b/jetty-server/src/main/java/org/eclipse/jetty/server/ResourceService.java
+index bfb3cf1a8570..5172c42386bb 100644
+--- a/jetty-server/src/main/java/org/eclipse/jetty/server/ResourceService.java
++++ b/jetty-server/src/main/java/org/eclipse/jetty/server/ResourceService.java
+@@ -428,7 +428,7 @@ protected void sendWelcome(HttpContent content, String pathInContext, boolean en
+                 return;
+             }
+ 
+-            RequestDispatcher dispatcher = context.getRequestDispatcher(welcome);
++            RequestDispatcher dispatcher = context.getRequestDispatcher(URIUtil.encodePath(welcome));
+             if (dispatcher != null)
+             {
+                 // Forward to the index
+diff --git a/jetty-server/src/test/java/org/eclipse/jetty/server/RequestTest.java b/jetty-server/src/test/java/org/eclipse/jetty/server/RequestTest.java
+index 2661e609e235..c6aa51937a88 100644
+--- a/jetty-server/src/test/java/org/eclipse/jetty/server/RequestTest.java
++++ b/jetty-server/src/test/java/org/eclipse/jetty/server/RequestTest.java
+@@ -1773,6 +1773,23 @@ public void testAmbiguousPaths() throws Exception
+             startsWith("HTTP/1.1 200"),
+             containsString("pathInfo=/path/ambiguous/.././info")));
+     }
++
++    @Test
++    public void testAmbiguousEncoding() throws Exception
++    {
++        _handler._checker = (request, response) -> true;
++        String request = "GET /ambiguous/encoded/%25/path HTTP/1.0\r\n" +
++            "Host: whatever\r\n" +
++            "\r\n";
++        _connector.getBean(HttpConnectionFactory.class).getHttpConfiguration().setUriCompliance(UriCompliance.DEFAULT);
++        assertThat(_connector.getResponse(request), startsWith("HTTP/1.1 400"));
++        _connector.getBean(HttpConnectionFactory.class).getHttpConfiguration().setUriCompliance(UriCompliance.LEGACY);
++        assertThat(_connector.getResponse(request), startsWith("HTTP/1.1 200"));
++        _connector.getBean(HttpConnectionFactory.class).getHttpConfiguration().setUriCompliance(UriCompliance.RFC3986);
++        assertThat(_connector.getResponse(request), startsWith("HTTP/1.1 200"));
++        _connector.getBean(HttpConnectionFactory.class).getHttpConfiguration().setUriCompliance(UriCompliance.UNSAFE);
++        assertThat(_connector.getResponse(request), startsWith("HTTP/1.1 200"));
++    }
+     
+     @Test
+     public void testPushBuilder()
+diff --git a/jetty-servlets/src/main/java/org/eclipse/jetty/servlets/ConcatServlet.java b/jetty-servlets/src/main/java/org/eclipse/jetty/servlets/ConcatServlet.java
+index 6dd46804f035..a0fcfa038d46 100644
+--- a/jetty-servlets/src/main/java/org/eclipse/jetty/servlets/ConcatServlet.java
++++ b/jetty-servlets/src/main/java/org/eclipse/jetty/servlets/ConcatServlet.java
+@@ -56,6 +56,7 @@
+  * appropriate. This means that when not in development mode, the servlet must be
+  * restarted before changed content will be served.</p>
+  */
++@Deprecated
+ public class ConcatServlet extends HttpServlet
+ {
+     private boolean _development;
+@@ -120,7 +121,8 @@ else if (!type.equals(t))
+                 }
+             }
+ 
+-            RequestDispatcher dispatcher = getServletContext().getRequestDispatcher(path);
++            // Use the original string and not the decoded path as the Dispatcher will decode again.
++            RequestDispatcher dispatcher = getServletContext().getRequestDispatcher(part);
+             if (dispatcher != null)
+                 dispatchers.add(dispatcher);
+         }
+diff --git a/jetty-servlets/src/main/java/org/eclipse/jetty/servlets/WelcomeFilter.java b/jetty-servlets/src/main/java/org/eclipse/jetty/servlets/WelcomeFilter.java
+index 687354e3ce14..d5abac44bdae 100644
+--- a/jetty-servlets/src/main/java/org/eclipse/jetty/servlets/WelcomeFilter.java
++++ b/jetty-servlets/src/main/java/org/eclipse/jetty/servlets/WelcomeFilter.java
+@@ -22,6 +22,8 @@
+ import javax.servlet.ServletResponse;
+ import javax.servlet.http.HttpServletRequest;
+ 
++import org.eclipse.jetty.util.URIUtil;
++
+ /**
+  * Welcome Filter
+  * This filter can be used to server an index file for a directory
+@@ -36,6 +38,7 @@
+  *
+  * Requests to "/some/directory" will be redirected to "/some/directory/".
+  */
++@Deprecated
+ public class WelcomeFilter implements Filter
+ {
+     private String welcome;
+@@ -56,7 +59,10 @@ public void doFilter(ServletRequest request,
+     {
+         String path = ((HttpServletRequest)request).getServletPath();
+         if (welcome != null && path.endsWith("/"))
+-            request.getRequestDispatcher(path + welcome).forward(request, response);
++        {
++            String uriInContext = URIUtil.encodePath(URIUtil.addPaths(path, welcome));
++            request.getRequestDispatcher(uriInContext).forward(request, response);
++        }
+         else
+             chain.doFilter(request, response);
+     }
+diff --git a/jetty-servlets/src/test/java/org/eclipse/jetty/servlets/ConcatServletTest.java b/jetty-servlets/src/test/java/org/eclipse/jetty/servlets/ConcatServletTest.java
+index fad32e1cafcf..79be0fca894c 100644
+--- a/jetty-servlets/src/test/java/org/eclipse/jetty/servlets/ConcatServletTest.java
++++ b/jetty-servlets/src/test/java/org/eclipse/jetty/servlets/ConcatServletTest.java
+@@ -21,12 +21,15 @@
+ import java.nio.charset.StandardCharsets;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
++import java.util.stream.Stream;
+ import javax.servlet.RequestDispatcher;
+ import javax.servlet.ServletException;
+ import javax.servlet.http.HttpServlet;
+ import javax.servlet.http.HttpServletRequest;
+ import javax.servlet.http.HttpServletResponse;
+ 
++import org.eclipse.jetty.http.UriCompliance;
++import org.eclipse.jetty.server.HttpConnectionFactory;
+ import org.eclipse.jetty.server.LocalConnector;
+ import org.eclipse.jetty.server.Server;
+ import org.eclipse.jetty.servlet.ServletContextHandler;
+@@ -36,7 +39,12 @@
+ import org.junit.jupiter.api.AfterEach;
+ import org.junit.jupiter.api.BeforeEach;
+ import org.junit.jupiter.api.Test;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.Arguments;
++import org.junit.jupiter.params.provider.MethodSource;
+ 
++import static org.hamcrest.MatcherAssert.assertThat;
++import static org.hamcrest.Matchers.startsWith;
+ import static org.junit.jupiter.api.Assertions.assertEquals;
+ import static org.junit.jupiter.api.Assertions.assertNotNull;
+ import static org.junit.jupiter.api.Assertions.assertNull;
+@@ -48,10 +56,11 @@ public class ConcatServletTest
+     private LocalConnector connector;
+ 
+     @BeforeEach
+-    public void prepareServer() throws Exception
++    public void prepareServer()
+     {
+         server = new Server();
+         connector = new LocalConnector(server);
++        connector.getConnectionFactory(HttpConnectionFactory.class).getHttpConfiguration().setUriCompliance(UriCompliance.RFC3986);
+         server.addConnector(connector);
+     }
+ 
+@@ -73,7 +82,7 @@ public void testConcatenation() throws Exception
+         ServletHolder resourceServletHolder = new ServletHolder(new HttpServlet()
+         {
+             @Override
+-            protected void doGet(HttpServletRequest request, HttpServletResponse response) throws ServletException, IOException
++            protected void doGet(HttpServletRequest request, HttpServletResponse response) throws IOException
+             {
+                 String includedURI = (String)request.getAttribute(RequestDispatcher.INCLUDE_REQUEST_URI);
+                 response.getOutputStream().println(includedURI);
+@@ -107,7 +116,7 @@ protected void doGet(HttpServletRequest request, HttpServletResponse response) t
+     }
+ 
+     @Test
+-    public void testWEBINFResourceIsNotServed() throws Exception
++    public void testDirectoryNotAccessible() throws Exception
+     {
+         File directoryFile = MavenTestingUtils.getTargetTestingDir();
+         Path directoryPath = directoryFile.toPath();
+@@ -129,9 +138,8 @@ public void testWEBINFResourceIsNotServed() throws Exception
+         // Verify that I can get the file programmatically, as required by the spec.
+         assertNotNull(context.getServletContext().getResource("/WEB-INF/one.js"));
+ 
+-        // Having a path segment and then ".." triggers a special case
+-        // that the ConcatServlet must detect and avoid.
+-        String uri = contextPath + concatPath + "?/trick/../WEB-INF/one.js";
++        // Make sure ConcatServlet cannot see file system files.
++        String uri = contextPath + concatPath + "?/trick/../../" + directoryFile.getName();
+         String request =
+             "GET " + uri + " HTTP/1.1\r\n" +
+                 "Host: localhost\r\n" +
+@@ -139,35 +147,59 @@ public void testWEBINFResourceIsNotServed() throws Exception
+                 "\r\n";
+         String response = connector.getResponse(request);
+         assertTrue(response.startsWith("HTTP/1.1 404 "));
++    }
+ 
+-        // Make sure ConcatServlet behaves well if it's case insensitive.
+-        uri = contextPath + concatPath + "?/trick/../web-inf/one.js";
+-        request =
+-            "GET " + uri + " HTTP/1.1\r\n" +
+-                "Host: localhost\r\n" +
+-                "Connection: close\r\n" +
+-                "\r\n";
+-        response = connector.getResponse(request);
+-        assertTrue(response.startsWith("HTTP/1.1 404 "));
++    public static Stream<Arguments> webInfTestExamples()
++    {
++        return Stream.of(
++            // Cannot access WEB-INF.
++            Arguments.of("?/WEB-INF/", "HTTP/1.1 404 "),
++            Arguments.of("?/WEB-INF/one.js", "HTTP/1.1 404 "),
++
++            // Having a path segment and then ".." triggers a special case that the ConcatServlet must detect and avoid.
++            Arguments.of("?/trick/../WEB-INF/one.js", "HTTP/1.1 404 "),
++
++            // Make sure ConcatServlet behaves well if it's case insensitive.
++            Arguments.of("?/trick/../web-inf/one.js", "HTTP/1.1 404 "),
++
++            // Make sure ConcatServlet behaves well if encoded.
++            Arguments.of("?/trick/..%2FWEB-INF%2Fone.js", "HTTP/1.1 404 "),
++            Arguments.of("?/%2557EB-INF/one.js", "HTTP/1.1 500 "),
++            Arguments.of("?/js/%252e%252e/WEB-INF/one.js", "HTTP/1.1 500 ")
++        );
++    }
+ 
+-        // Make sure ConcatServlet behaves well if encoded.
+-        uri = contextPath + concatPath + "?/trick/..%2FWEB-INF%2Fone.js";
+-        request =
+-            "GET " + uri + " HTTP/1.1\r\n" +
+-                "Host: localhost\r\n" +
+-                "Connection: close\r\n" +
+-                "\r\n";
+-        response = connector.getResponse(request);
+-        assertTrue(response.startsWith("HTTP/1.1 404 "));
++    @ParameterizedTest
++    @MethodSource("webInfTestExamples")
++    public void testWEBINFResourceIsNotServed(String querystring, String expectedStatus) throws Exception
++    {
++        File directoryFile = MavenTestingUtils.getTargetTestingDir();
++        Path directoryPath = directoryFile.toPath();
++        Path hiddenDirectory = directoryPath.resolve("WEB-INF");
++        Files.createDirectories(hiddenDirectory);
++        Path hiddenResource = hiddenDirectory.resolve("one.js");
++        try (OutputStream output = Files.newOutputStream(hiddenResource))
++        {
++            output.write("function() {}".getBytes(StandardCharsets.UTF_8));
++        }
+ 
+-        // Make sure ConcatServlet cannot see file system files.
+-        uri = contextPath + concatPath + "?/trick/../../" + directoryFile.getName();
+-        request =
++        String contextPath = "";
++        WebAppContext context = new WebAppContext(server, directoryPath.toString(), contextPath);
++        server.setHandler(context);
++        String concatPath = "/concat";
++        context.addServlet(ConcatServlet.class, concatPath);
++        server.start();
++
++        // Verify that I can get the file programmatically, as required by the spec.
++        assertNotNull(context.getServletContext().getResource("/WEB-INF/one.js"));
++
++        String uri = contextPath + concatPath + querystring;
++        String request =
+             "GET " + uri + " HTTP/1.1\r\n" +
+                 "Host: localhost\r\n" +
+                 "Connection: close\r\n" +
+                 "\r\n";
+-        response = connector.getResponse(request);
+-        assertTrue(response.startsWith("HTTP/1.1 404 "));
++        String response = connector.getResponse(request);
++        assertThat(response, startsWith(expectedStatus));
+     }
+ }
+diff --git a/jetty-servlets/src/test/java/org/eclipse/jetty/servlets/WelcomeFilterTest.java b/jetty-servlets/src/test/java/org/eclipse/jetty/servlets/WelcomeFilterTest.java
+new file mode 100644
+index 000000000000..2e3cbae99526
+--- /dev/null
++++ b/jetty-servlets/src/test/java/org/eclipse/jetty/servlets/WelcomeFilterTest.java
+@@ -0,0 +1,141 @@
++//
++// ========================================================================
++// Copyright (c) 1995-2021 Mort Bay Consulting Pty Ltd and others.
++//
++// This program and the accompanying materials are made available under the
++// terms of the Eclipse Public License v. 2.0 which is available at
++// https://www.eclipse.org/legal/epl-2.0, or the Apache License, Version 2.0
++// which is available at https://www.apache.org/licenses/LICENSE-2.0.
++//
++// SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
++// ========================================================================
++//
++
++package org.eclipse.jetty.servlets;
++
++import java.io.OutputStream;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.EnumSet;
++import java.util.stream.Stream;
++import javax.servlet.DispatcherType;
++
++import org.eclipse.jetty.http.UriCompliance;
++import org.eclipse.jetty.server.HttpConnectionFactory;
++import org.eclipse.jetty.server.LocalConnector;
++import org.eclipse.jetty.server.Server;
++import org.eclipse.jetty.servlet.FilterHolder;
++import org.eclipse.jetty.toolchain.test.MavenTestingUtils;
++import org.eclipse.jetty.webapp.WebAppContext;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.Arguments;
++import org.junit.jupiter.params.provider.MethodSource;
++
++import static org.hamcrest.MatcherAssert.assertThat;
++import static org.hamcrest.Matchers.containsString;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++
++public class WelcomeFilterTest
++{
++    private Server server;
++    private LocalConnector connector;
++
++    @BeforeEach
++    public void prepareServer() throws Exception
++    {
++        server = new Server();
++        connector = new LocalConnector(server);
++        connector.getConnectionFactory(HttpConnectionFactory.class).getHttpConfiguration().setUriCompliance(UriCompliance.RFC3986);
++        server.addConnector(connector);
++
++        Path directoryPath = MavenTestingUtils.getTargetTestingDir().toPath();
++        Files.createDirectories(directoryPath);
++        Path welcomeResource = directoryPath.resolve("welcome.html");
++        try (OutputStream output = Files.newOutputStream(welcomeResource))
++        {
++            output.write("<h1>welcome page</h1>".getBytes(StandardCharsets.UTF_8));
++        }
++
++        Path otherResource = directoryPath.resolve("other.html");
++        try (OutputStream output = Files.newOutputStream(otherResource))
++        {
++            output.write("<h1>other resource</h1>".getBytes(StandardCharsets.UTF_8));
++        }
++
++        Path hiddenDirectory = directoryPath.resolve("WEB-INF");
++        Files.createDirectories(hiddenDirectory);
++        Path hiddenResource = hiddenDirectory.resolve("one.js");
++        try (OutputStream output = Files.newOutputStream(hiddenResource))
++        {
++            output.write("CONFIDENTIAL".getBytes(StandardCharsets.UTF_8));
++        }
++
++        Path hiddenWelcome = hiddenDirectory.resolve("index.html");
++        try (OutputStream output = Files.newOutputStream(hiddenWelcome))
++        {
++            output.write("CONFIDENTIAL".getBytes(StandardCharsets.UTF_8));
++        }
++
++        WebAppContext context = new WebAppContext(server, directoryPath.toString(), "/");
++        server.setHandler(context);
++        String concatPath = "/*";
++
++        FilterHolder filterHolder = new FilterHolder(new WelcomeFilter());
++        filterHolder.setInitParameter("welcome", "welcome.html");
++        context.addFilter(filterHolder, concatPath, EnumSet.of(DispatcherType.REQUEST));
++        server.start();
++
++        // Verify that I can get the file programmatically, as required by the spec.
++        assertNotNull(context.getServletContext().getResource("/WEB-INF/one.js"));
++    }
++
++    @AfterEach
++    public void destroy() throws Exception
++    {
++        if (server != null)
++            server.stop();
++    }
++
++    public static Stream<Arguments> argumentsStream()
++    {
++        return Stream.of(
++            // Normal requests for the directory are redirected to the welcome page.
++            Arguments.of("/", new String[]{"HTTP/1.1 200 ", "<h1>welcome page</h1>"}),
++
++            // Try a normal resource (will bypass the filter).
++            Arguments.of("/other.html", new String[]{"HTTP/1.1 200 ", "<h1>other resource</h1>"}),
++
++            // Cannot access files in WEB-INF.
++            Arguments.of("/WEB-INF/one.js", new String[]{"HTTP/1.1 404 "}),
++
++            // Cannot serve welcome from WEB-INF.
++            Arguments.of("/WEB-INF/", new String[]{"HTTP/1.1 404 "}),
++
++            // Try to trick the filter into serving a protected resource.
++            Arguments.of("/WEB-INF/one.js#/", new String[]{"HTTP/1.1 404 "}),
++            Arguments.of("/js/../WEB-INF/one.js#/", new String[]{"HTTP/1.1 404 "}),
++
++            // Test the URI is not double decoded in the dispatcher.
++            Arguments.of("/%2557EB-INF/one.js%23/", new String[]{"HTTP/1.1 404 "})
++        );
++    }
++
++    @ParameterizedTest
++    @MethodSource("argumentsStream")
++    public void testWelcomeFilter(String uri, String[] contains) throws Exception
++    {
++        String request =
++            "GET " + uri + " HTTP/1.1\r\n" +
++                "Host: localhost\r\n" +
++                "Connection: close\r\n" +
++                "\r\n";
++        String response = connector.getResponse(request);
++        for (String s : contains)
++        {
++            assertThat(response, containsString(s));
++        }
++    }
++}
+diff --git a/jetty-webapp/src/test/java/org/eclipse/jetty/webapp/WebAppDefaultServletTest.java b/jetty-webapp/src/test/java/org/eclipse/jetty/webapp/WebAppDefaultServletTest.java
+new file mode 100644
+index 000000000000..2ab5aeb110b9
+--- /dev/null
++++ b/jetty-webapp/src/test/java/org/eclipse/jetty/webapp/WebAppDefaultServletTest.java
+@@ -0,0 +1,140 @@
++//
++// ========================================================================
++// Copyright (c) 1995-2021 Mort Bay Consulting Pty Ltd and others.
++//
++// This program and the accompanying materials are made available under the
++// terms of the Eclipse Public License v. 2.0 which is available at
++// https://www.eclipse.org/legal/epl-2.0, or the Apache License, Version 2.0
++// which is available at https://www.apache.org/licenses/LICENSE-2.0.
++//
++// SPDX-License-Identifier: EPL-2.0 OR Apache-2.0
++// ========================================================================
++//
++
++package org.eclipse.jetty.webapp;
++
++import java.io.OutputStream;
++import java.nio.charset.StandardCharsets;
++import java.nio.file.Files;
++import java.nio.file.Path;
++import java.util.stream.Stream;
++
++import org.eclipse.jetty.http.UriCompliance;
++import org.eclipse.jetty.server.HttpConnectionFactory;
++import org.eclipse.jetty.server.LocalConnector;
++import org.eclipse.jetty.server.Server;
++import org.eclipse.jetty.toolchain.test.MavenTestingUtils;
++import org.eclipse.jetty.util.IO;
++import org.junit.jupiter.api.AfterEach;
++import org.junit.jupiter.api.BeforeEach;
++import org.junit.jupiter.params.ParameterizedTest;
++import org.junit.jupiter.params.provider.Arguments;
++import org.junit.jupiter.params.provider.MethodSource;
++
++import static org.hamcrest.MatcherAssert.assertThat;
++import static org.hamcrest.Matchers.containsString;
++import static org.junit.jupiter.api.Assertions.assertNotNull;
++
++public class WebAppDefaultServletTest
++{
++    private Server server;
++    private LocalConnector connector;
++
++    @BeforeEach
++    public void prepareServer() throws Exception
++    {
++        server = new Server();
++        connector = new LocalConnector(server);
++        connector.getConnectionFactory(HttpConnectionFactory.class).getHttpConfiguration().setUriCompliance(UriCompliance.RFC3986);
++        server.addConnector(connector);
++
++        Path directoryPath = MavenTestingUtils.getTargetTestingDir().toPath();
++        IO.delete(directoryPath.toFile());
++        Files.createDirectories(directoryPath);
++        Path welcomeResource = directoryPath.resolve("index.html");
++        try (OutputStream output = Files.newOutputStream(welcomeResource))
++        {
++            output.write("<h1>welcome page</h1>".getBytes(StandardCharsets.UTF_8));
++        }
++
++        Path otherResource = directoryPath.resolve("other.html");
++        try (OutputStream output = Files.newOutputStream(otherResource))
++        {
++            output.write("<h1>other resource</h1>".getBytes(StandardCharsets.UTF_8));
++        }
++
++        Path hiddenDirectory = directoryPath.resolve("WEB-INF");
++        Files.createDirectories(hiddenDirectory);
++        Path hiddenResource = hiddenDirectory.resolve("one.js");
++        try (OutputStream output = Files.newOutputStream(hiddenResource))
++        {
++            output.write("this is confidential".getBytes(StandardCharsets.UTF_8));
++        }
++
++        // Create directory to trick resource service.
++        Path hackPath = directoryPath.resolve("%57EB-INF/one.js#/");
++        Files.createDirectories(hackPath);
++        try (OutputStream output = Files.newOutputStream(hackPath.resolve("index.html")))
++        {
++            output.write("this content does not matter".getBytes(StandardCharsets.UTF_8));
++        }
++
++        Path standardHashDir = directoryPath.resolve("welcome#");
++        Files.createDirectories(standardHashDir);
++        try (OutputStream output = Files.newOutputStream(standardHashDir.resolve("index.html")))
++        {
++            output.write("standard hash dir welcome".getBytes(StandardCharsets.UTF_8));
++        }
++
++        WebAppContext context = new WebAppContext(server, directoryPath.toString(), "/");
++        server.setHandler(context);
++        server.start();
++
++        // Verify that I can get the file programmatically, as required by the spec.
++        assertNotNull(context.getServletContext().getResource("/WEB-INF/one.js"));
++    }
++
++    @AfterEach
++    public void destroy() throws Exception
++    {
++        if (server != null)
++            server.stop();
++    }
++
++    public static Stream<Arguments> argumentsStream()
++    {
++        return Stream.of(
++            Arguments.of("/WEB-INF/", new String[]{"HTTP/1.1 404 "}),
++            Arguments.of("/welcome%23/", new String[]{"HTTP/1.1 200 ", "standard hash dir welcome"}),
++
++            // Normal requests for the directory are redirected to the welcome page.
++            Arguments.of("/", new String[]{"HTTP/1.1 200 ", "<h1>welcome page</h1>"}),
++
++            // We can be served other resources.
++            Arguments.of("/other.html", new String[]{"HTTP/1.1 200 ", "<h1>other resource</h1>"}),
++
++            // The ContextHandler will filter these ones out as as WEB-INF is a protected target.
++            Arguments.of("/WEB-INF/one.js#/", new String[]{"HTTP/1.1 404 "}),
++            Arguments.of("/js/../WEB-INF/one.js#/", new String[]{"HTTP/1.1 404 "}),
++
++            // Test the URI is not double decoded by the dispatcher that serves the welcome file (we get index.html not one.js).
++            Arguments.of("/%2557EB-INF/one.js%23/", new String[]{"HTTP/1.1 200 ", "this content does not matter"})
++        );
++    }
++
++    @ParameterizedTest
++    @MethodSource("argumentsStream")
++    public void testResourceService(String uri, String[] contains) throws Exception
++    {
++        String request =
++            "GET " + uri + " HTTP/1.1\r\n" +
++                "Host: localhost\r\n" +
++                "Connection: close\r\n" +
++                "\r\n";
++        String response = connector.getResponse(request);
++        for (String s : contains)
++        {
++            assertThat(response, containsString(s));
++        }
++    }
++}

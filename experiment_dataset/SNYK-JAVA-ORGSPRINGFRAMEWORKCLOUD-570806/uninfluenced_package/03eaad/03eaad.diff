@@ -1,0 +1,185 @@
+diff --git a/pom.xml b/pom.xml
+index 5dd2b3712..8dd115901 100644
+--- a/pom.xml
++++ b/pom.xml
+@@ -27,7 +27,7 @@
+ 	</scm>
+ 	<properties>
+ 		<bintray.package>config</bintray.package>
+-		<spring-cloud-commons.version>2.1.7.BUILD-SNAPSHOT</spring-cloud-commons.version>
++		<spring-cloud-commons.version>2.1.6.BUILD-SNAPSHOT</spring-cloud-commons.version>
+ 
+ 		<maven-checkstyle-plugin.failsOnError>true</maven-checkstyle-plugin.failsOnError>
+ 		<maven-checkstyle-plugin.failsOnViolation>true
+diff --git a/spring-cloud-config-dependencies/pom.xml b/spring-cloud-config-dependencies/pom.xml
+index c2e269415..ff4ebe2db 100644
+--- a/spring-cloud-config-dependencies/pom.xml
++++ b/spring-cloud-config-dependencies/pom.xml
+@@ -6,7 +6,7 @@
+ 	<parent>
+ 		<artifactId>spring-cloud-dependencies-parent</artifactId>
+ 		<groupId>org.springframework.cloud</groupId>
+-		<version>2.1.12.BUILD-SNAPSHOT</version>
++		<version>2.1.11.BUILD-SNAPSHOT</version>
+ 		<relativePath/>
+ 	</parent>
+ 	<artifactId>spring-cloud-config-dependencies</artifactId>
+diff --git a/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/resource/GenericResourceRepository.java b/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/resource/GenericResourceRepository.java
+index 87b897647..667827fca 100644
+--- a/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/resource/GenericResourceRepository.java
++++ b/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/resource/GenericResourceRepository.java
+@@ -17,6 +17,7 @@
+ package org.springframework.cloud.config.server.resource;
+ 
+ import java.io.IOException;
++import java.util.ArrayList;
+ import java.util.Collection;
+ import java.util.LinkedHashSet;
+ import java.util.Set;
+@@ -56,18 +57,22 @@ public synchronized Resource findOne(String application, String profile, String
+ 		if (StringUtils.hasText(path)) {
+ 			String[] locations = this.service.getLocations(application, profile, label)
+ 					.getLocations();
++			ArrayList<Resource> locationResources = new ArrayList<>();
++			for (int i = locations.length; i-- > 0;) {
++				String location = locations[i];
++				if (!PathUtils.isInvalidEncodedLocation(location)) {
++					locationResources.add(this.resourceLoader.getResource(location));
++				}
++			}
++
+ 			try {
+-				for (int i = locations.length; i-- > 0;) {
+-					String location = locations[i];
+-					if (PathUtils.isInvalidEncodedLocation(location)) {
+-						continue;
+-					}
++				for (Resource location : locationResources) {
+ 					for (String local : getProfilePaths(profile, path)) {
+ 						if (!PathUtils.isInvalidPath(local)
+ 								&& !PathUtils.isInvalidEncodedPath(local)) {
+-							Resource file = this.resourceLoader.getResource(location)
+-									.createRelative(local);
+-							if (file.exists() && file.isReadable()) {
++							Resource file = location.createRelative(local);
++							if (file.exists() && file.isReadable() && PathUtils
++									.checkResource(file, location, locationResources)) {
+ 								return file;
+ 							}
+ 						}
+diff --git a/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/support/PathUtils.java b/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/support/PathUtils.java
+index 6c2488c15..92251ca0c 100644
+--- a/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/support/PathUtils.java
++++ b/spring-cloud-config-server/src/main/java/org/springframework/cloud/config/server/support/PathUtils.java
+@@ -16,12 +16,17 @@
+ 
+ package org.springframework.cloud.config.server.support;
+ 
++import java.io.IOException;
+ import java.io.UnsupportedEncodingException;
+ import java.net.URLDecoder;
++import java.util.List;
+ 
+ import org.apache.commons.logging.Log;
+ import org.apache.commons.logging.LogFactory;
+ 
++import org.springframework.core.io.ClassPathResource;
++import org.springframework.core.io.Resource;
++import org.springframework.core.io.UrlResource;
+ import org.springframework.util.ResourceUtils;
+ import org.springframework.util.StringUtils;
+ 
+@@ -203,4 +208,71 @@ public static boolean isInvalidPath(String path) {
+ 		return false;
+ 	}
+ 
++	/**
++	 * Perform additional checks on a resolved resource beyond checking whether the
++	 * resources exists and is readable. The default implementation also verifies the
++	 * resource is either under the location relative to which it was found or is under
++	 * one of the {@link #setAllowedLocations allowed locations}.
++	 * @param resource the resource to check
++	 * @param location the location relative to which the resource was found
++	 * @param allowedLocations set of allowed locations
++	 * @return "true" if resource is in a valid location, "false" otherwise.
++	 * @throws IOException if Resource URLS fail to parse.
++	 * @since 4.1.2
++	 */
++	public static boolean checkResource(Resource resource, Resource location,
++			List<Resource> allowedLocations) throws IOException {
++		if (isResourceUnderLocation(resource, location)) {
++			return true;
++		}
++		if (allowedLocations != null) {
++			for (Resource current : allowedLocations) {
++				if (isResourceUnderLocation(resource, current)) {
++					return true;
++				}
++			}
++		}
++		if (logger.isWarnEnabled()) {
++			logger.warn("Resource path \"" + location.getURI()
++					+ "\" was successfully resolved " + "but resource \""
++					+ resource.getURL() + "\" is neither under the "
++					+ "current location \"" + location.getURL()
++					+ "\" nor under any of the " + "allowed locations "
++					+ (allowedLocations != null ? allowedLocations : "[]"));
++		}
++		return false;
++	}
++
++	private static boolean isResourceUnderLocation(Resource resource, Resource location)
++			throws IOException {
++		if (resource.getClass() != location.getClass()) {
++			return false;
++		}
++
++		String resourcePath;
++		String locationPath;
++
++		if (resource instanceof UrlResource) {
++			resourcePath = resource.getURL().toExternalForm();
++			locationPath = StringUtils.cleanPath(location.getURL().toString());
++		}
++		else if (resource instanceof ClassPathResource) {
++			resourcePath = ((ClassPathResource) resource).getPath();
++			locationPath = StringUtils
++					.cleanPath(((ClassPathResource) location).getPath());
++		}
++		else {
++			resourcePath = resource.getURL().getPath();
++			locationPath = StringUtils.cleanPath(location.getURL().getPath());
++		}
++
++		if (locationPath.equals(resourcePath)) {
++			return true;
++		}
++		locationPath = (locationPath.endsWith("/") || locationPath.isEmpty()
++				? locationPath : locationPath + "/");
++		return (resourcePath.startsWith(locationPath)
++				&& !isInvalidEncodedPath(resourcePath));
++	}
++
+ }
+diff --git a/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/resource/GenericResourceRepositoryTests.java b/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/resource/GenericResourceRepositoryTests.java
+index f5c5593dc..1f64409e1 100644
+--- a/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/resource/GenericResourceRepositoryTests.java
++++ b/spring-cloud-config-server/src/test/java/org/springframework/cloud/config/server/resource/GenericResourceRepositoryTests.java
+@@ -120,6 +120,17 @@ public void invalidPathWithPreviousDirectoryAllEncoded() {
+ 		testInvalidPath("%2E%2E%2F");
+ 	}
+ 
++	@Test
++	public void invalidPathEncodedSlash() {
++		String file = System.getProperty("user.dir");
++		file = file.replaceFirst("\\/", "%2f");
++		file += "/src/test/resources/ssh/key";
++		this.exception.expect(NoSuchResourceException.class);
++		this.nativeRepository.setSearchLocations("file:./");
++		this.output.expect(containsString("is neither under the current location"));
++		this.repository.findOne("blah", "local", "master", file);
++	}
++
+ 	private void testInvalidPath(String label) {
+ 		this.exception.expect(NoSuchResourceException.class);
+ 		this.nativeRepository.setSearchLocations("file:./src/test/resources/test/local");

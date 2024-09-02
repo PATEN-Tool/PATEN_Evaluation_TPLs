@@ -1,0 +1,176 @@
+// 
+// Decompiled by Procyon v0.5.36
+// 
+
+package org.springframework.data.web;
+
+import org.springframework.core.CollectionFactory;
+import java.util.List;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.AccessException;
+import org.springframework.util.Assert;
+import org.springframework.context.expression.MapAccessor;
+import org.springframework.expression.spel.SpelParserConfiguration;
+import java.beans.PropertyDescriptor;
+import org.springframework.data.util.TypeInformation;
+import org.springframework.data.mapping.PropertyPath;
+import org.springframework.expression.Expression;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.core.MethodParameter;
+import org.springframework.beans.BeanUtils;
+import org.springframework.expression.TypeConverter;
+import org.springframework.expression.spel.support.StandardTypeConverter;
+import org.springframework.expression.PropertyAccessor;
+import org.springframework.expression.spel.support.StandardEvaluationContext;
+import org.springframework.beans.NotWritablePropertyException;
+import org.springframework.beans.BeansException;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.data.mapping.PropertyReferenceException;
+import lombok.NonNull;
+import org.springframework.expression.spel.standard.SpelExpressionParser;
+import org.springframework.beans.AbstractPropertyAccessor;
+import org.springframework.beans.ConfigurablePropertyAccessor;
+import java.util.Map;
+import java.util.HashMap;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.web.bind.WebDataBinder;
+
+class MapDataBinder extends WebDataBinder
+{
+    private final Class<?> type;
+    private final ConversionService conversionService;
+    
+    public MapDataBinder(final Class<?> type, final ConversionService conversionService) {
+        super((Object)new HashMap());
+        this.type = type;
+        this.conversionService = conversionService;
+    }
+    
+    public Map<String, Object> getTarget() {
+        return (Map<String, Object>)super.getTarget();
+    }
+    
+    protected ConfigurablePropertyAccessor getPropertyAccessor() {
+        return (ConfigurablePropertyAccessor)new MapPropertyAccessor(this.type, this.getTarget(), this.conversionService);
+    }
+    
+    private static class MapPropertyAccessor extends AbstractPropertyAccessor
+    {
+        private static final SpelExpressionParser PARSER;
+        @NonNull
+        private final Class<?> type;
+        @NonNull
+        private final Map<String, Object> map;
+        @NonNull
+        private final ConversionService conversionService;
+        
+        public boolean isReadableProperty(final String propertyName) {
+            throw new UnsupportedOperationException();
+        }
+        
+        public boolean isWritableProperty(final String propertyName) {
+            try {
+                return this.getPropertyPath(propertyName) != null;
+            }
+            catch (PropertyReferenceException o_O) {
+                return false;
+            }
+        }
+        
+        public TypeDescriptor getPropertyTypeDescriptor(final String propertyName) throws BeansException {
+            throw new UnsupportedOperationException();
+        }
+        
+        public Object getPropertyValue(final String propertyName) throws BeansException {
+            throw new UnsupportedOperationException();
+        }
+        
+        public void setPropertyValue(final String propertyName, Object value) throws BeansException {
+            if (!this.isWritableProperty(propertyName)) {
+                throw new NotWritablePropertyException((Class)this.type, propertyName);
+            }
+            final StandardEvaluationContext context = new StandardEvaluationContext();
+            context.addPropertyAccessor((PropertyAccessor)new PropertyTraversingMapAccessor(this.type, this.conversionService));
+            context.setTypeConverter((TypeConverter)new StandardTypeConverter(this.conversionService));
+            context.setRootObject((Object)this.map);
+            final Expression expression = MapPropertyAccessor.PARSER.parseExpression(propertyName);
+            final PropertyPath leafProperty = this.getPropertyPath(propertyName).getLeafProperty();
+            final TypeInformation<?> owningType = leafProperty.getOwningType();
+            TypeInformation<?> propertyType = owningType.getProperty(leafProperty.getSegment());
+            propertyType = (propertyName.endsWith("]") ? propertyType.getActualType() : propertyType);
+            if (this.conversionRequired(value, propertyType.getType())) {
+                final PropertyDescriptor descriptor = BeanUtils.getPropertyDescriptor((Class)owningType.getType(), leafProperty.getSegment());
+                final MethodParameter methodParameter = new MethodParameter(descriptor.getReadMethod(), -1);
+                final TypeDescriptor typeDescriptor = TypeDescriptor.nested(methodParameter, 0);
+                value = this.conversionService.convert(value, TypeDescriptor.forObject(value), typeDescriptor);
+            }
+            expression.setValue((EvaluationContext)context, value);
+        }
+        
+        private boolean conversionRequired(final Object source, final Class<?> targetType) {
+            return !targetType.isInstance(source) && this.conversionService.canConvert((Class)source.getClass(), (Class)targetType);
+        }
+        
+        private PropertyPath getPropertyPath(final String propertyName) {
+            final String plainPropertyPath = propertyName.replaceAll("\\[.*?\\]", "");
+            return PropertyPath.from(plainPropertyPath, this.type);
+        }
+        
+        public MapPropertyAccessor(@NonNull final Class<?> type, @NonNull final Map<String, Object> map, @NonNull final ConversionService conversionService) {
+            if (type == null) {
+                throw new IllegalArgumentException("type is null");
+            }
+            if (map == null) {
+                throw new IllegalArgumentException("map is null");
+            }
+            if (conversionService == null) {
+                throw new IllegalArgumentException("conversionService is null");
+            }
+            this.type = type;
+            this.map = map;
+            this.conversionService = conversionService;
+        }
+        
+        static {
+            PARSER = new SpelExpressionParser(new SpelParserConfiguration(false, true));
+        }
+        
+        private static final class PropertyTraversingMapAccessor extends MapAccessor
+        {
+            private final ConversionService conversionService;
+            private Class<?> type;
+            
+            public PropertyTraversingMapAccessor(final Class<?> type, final ConversionService conversionService) {
+                Assert.notNull((Object)type, "Type must not be null!");
+                Assert.notNull((Object)conversionService, "ConversionService must not be null!");
+                this.type = type;
+                this.conversionService = conversionService;
+            }
+            
+            public boolean canRead(final EvaluationContext context, final Object target, final String name) throws AccessException {
+                return true;
+            }
+            
+            public TypedValue read(final EvaluationContext context, final Object target, final String name) throws AccessException {
+                final PropertyPath path = PropertyPath.from(name, this.type);
+                try {
+                    return super.read(context, target, name);
+                }
+                catch (AccessException o_O) {
+                    final Object emptyResult = path.isCollection() ? CollectionFactory.createCollection((Class)List.class, 0) : CollectionFactory.createMap((Class)Map.class, 0);
+                    ((Map)target).put(name, emptyResult);
+                    return new TypedValue(emptyResult, this.getDescriptor(path, emptyResult));
+                }
+                finally {
+                    this.type = path.getType();
+                }
+            }
+            
+            private TypeDescriptor getDescriptor(final PropertyPath path, final Object emptyValue) {
+                final Class<?> actualPropertyType = path.getType();
+                final TypeDescriptor valueDescriptor = this.conversionService.canConvert((Class)String.class, (Class)actualPropertyType) ? TypeDescriptor.valueOf((Class)String.class) : TypeDescriptor.valueOf((Class)HashMap.class);
+                return path.isCollection() ? TypeDescriptor.collection((Class)emptyValue.getClass(), valueDescriptor) : TypeDescriptor.map((Class)emptyValue.getClass(), TypeDescriptor.valueOf((Class)String.class), valueDescriptor);
+            }
+        }
+    }
+}

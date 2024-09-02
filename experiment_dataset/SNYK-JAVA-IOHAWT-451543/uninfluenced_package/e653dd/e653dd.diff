@@ -1,0 +1,212 @@
+diff --git a/CHANGES.md b/CHANGES.md
+index 9fcf2fc92e..bcbe4c1f83 100644
+--- a/CHANGES.md
++++ b/CHANGES.md
+@@ -2,6 +2,9 @@
+ 
+ #### 2.5.0 (To be released)
+ 
++* Add config property `hawtio.localAddressProbing`. Now you can disable local address probing
++  for proxy whitelist upon startup by setting this property to `false` (default: `true`).
++
+ #### 2.4.0
+ 
+ * Support Java 11
+diff --git a/hawtio-system/src/main/java/io/hawt/HawtioContextListener.java b/hawtio-system/src/main/java/io/hawt/HawtioContextListener.java
+index 22d66d7980..586a1795c4 100644
+--- a/hawtio-system/src/main/java/io/hawt/HawtioContextListener.java
++++ b/hawtio-system/src/main/java/io/hawt/HawtioContextListener.java
+@@ -58,7 +58,7 @@ public void contextInitialized(ServletContextEvent servletContextEvent) {
+         } catch (Exception e) {
+             throw createServletException(e);
+         }
+-        servletContextEvent.getServletContext().setAttribute("ConfigManager", configManager);
++        servletContextEvent.getServletContext().setAttribute(ConfigManager.CONFIG_MANAGER, configManager);
+     }
+ 
+     public void contextDestroyed(ServletContextEvent servletContextEvent) {
+diff --git a/hawtio-system/src/main/java/io/hawt/system/ConfigManager.java b/hawtio-system/src/main/java/io/hawt/system/ConfigManager.java
+index 8aa1d2c3eb..4aa36ea488 100644
+--- a/hawtio-system/src/main/java/io/hawt/system/ConfigManager.java
++++ b/hawtio-system/src/main/java/io/hawt/system/ConfigManager.java
+@@ -19,6 +19,8 @@ public class ConfigManager {
+ 
+     private static final transient Logger LOG = LoggerFactory.getLogger(ConfigManager.class);
+ 
++    public static final String CONFIG_MANAGER = "ConfigManager";
++
+     private Context envContext = null;
+ 
+     private Function<String, String> propertyResolver;
+@@ -82,6 +84,10 @@ public String get(String name, String defaultValue) {
+         return answer;
+     }
+ 
++    public boolean getBoolean(String name, boolean defaultValue) {
++        return Boolean.parseBoolean(get(name, Boolean.toString(defaultValue)));
++    }
++
+     private static String getHawtioSystemProperty(String name) {
+         return System.getProperty("hawtio." + name);
+     }
+diff --git a/hawtio-system/src/main/java/io/hawt/system/ProxyWhitelist.java b/hawtio-system/src/main/java/io/hawt/system/ProxyWhitelist.java
+index 973f5b91d0..74fe7ef3cc 100644
+--- a/hawtio-system/src/main/java/io/hawt/system/ProxyWhitelist.java
++++ b/hawtio-system/src/main/java/io/hawt/system/ProxyWhitelist.java
+@@ -41,6 +41,10 @@ public class ProxyWhitelist {
+     protected ObjectName fabricMBean;
+ 
+     public ProxyWhitelist(String whitelistStr) {
++        this(whitelistStr, true);
++    }
++
++    public ProxyWhitelist(String whitelistStr, boolean probeLocal) {
+         if (Strings.isBlank(whitelistStr)) {
+             whitelist = new CopyOnWriteArraySet<>();
+             regexWhitelist = Collections.emptyList();
+@@ -48,7 +52,15 @@ public ProxyWhitelist(String whitelistStr) {
+             whitelist = new CopyOnWriteArraySet<>(filterRegex(Strings.split(whitelistStr, ",")));
+             regexWhitelist = buildRegexWhitelist(Strings.split(whitelistStr, ","));
+         }
+-        initialiseWhitelist();
++
++        if (probeLocal) {
++            LOG.info("Probing local addresses ...");
++            initialiseWhitelist();
++        } else {
++            LOG.info("Probing local addresses disabled");
++            whitelist.add("localhost");
++            whitelist.add("127.0.0.1");
++        }
+         LOG.info("Initial proxy whitelist: {}", whitelist);
+ 
+         mBeanServer = ManagementFactory.getPlatformMBeanServer();
+diff --git a/hawtio-system/src/main/java/io/hawt/web/auth/AuthenticationConfiguration.java b/hawtio-system/src/main/java/io/hawt/web/auth/AuthenticationConfiguration.java
+index 4d5b8523df..2c0f10d100 100644
+--- a/hawtio-system/src/main/java/io/hawt/web/auth/AuthenticationConfiguration.java
++++ b/hawtio-system/src/main/java/io/hawt/web/auth/AuthenticationConfiguration.java
+@@ -40,7 +40,6 @@ public class AuthenticationConfiguration {
+ 
+     // ServletContext attributes
+     public static final String AUTHENTICATION_CONFIGURATION = "authenticationConfig";
+-    public static final String CONFIG_MANAGER = "ConfigManager";
+ 
+     public static final String DEFAULT_REALM = "karaf";
+     private static final String DEFAULT_KARAF_ROLES = "admin,manager,viewer";
+@@ -60,7 +59,7 @@ public class AuthenticationConfiguration {
+     private boolean keycloakEnabled;
+ 
+     public AuthenticationConfiguration(ServletContext servletContext) {
+-        ConfigManager config = (ConfigManager) servletContext.getAttribute(CONFIG_MANAGER);
++        ConfigManager config = (ConfigManager) servletContext.getAttribute(ConfigManager.CONFIG_MANAGER);
+ 
+         String defaultRolePrincipalClasses = "";
+ 
+@@ -83,9 +82,9 @@ public AuthenticationConfiguration(ServletContext servletContext) {
+             }
+             this.role = roles;
+             this.rolePrincipalClasses = config.get(ROLE_PRINCIPAL_CLASSES, defaultRolePrincipalClasses);
+-            this.enabled = Boolean.parseBoolean(config.get(AUTHENTICATION_ENABLED, "true"));
+-            this.noCredentials401 = Boolean.parseBoolean(config.get(NO_CREDENTIALS_401, "false"));
+-            this.keycloakEnabled = this.enabled && Boolean.parseBoolean(config.get(KEYCLOAK_ENABLED, "false"));
++            this.enabled = config.getBoolean(AUTHENTICATION_ENABLED, true);
++            this.noCredentials401 = config.getBoolean(NO_CREDENTIALS_401, false);
++            this.keycloakEnabled = this.enabled && config.getBoolean(KEYCLOAK_ENABLED, false);
+ 
+             authDiscoveryClasses = config.get(AUTHENTICATION_CONTAINER_DISCOVERY_CLASSES, authDiscoveryClasses);
+         }
+diff --git a/hawtio-system/src/main/java/io/hawt/web/auth/LoginServlet.java b/hawtio-system/src/main/java/io/hawt/web/auth/LoginServlet.java
+index d3d6930892..9974ddf3e7 100644
+--- a/hawtio-system/src/main/java/io/hawt/web/auth/LoginServlet.java
++++ b/hawtio-system/src/main/java/io/hawt/web/auth/LoginServlet.java
+@@ -52,7 +52,7 @@ public void init() {
+     }
+ 
+     private void setupSessionTimeout() {
+-        ConfigManager configManager = (ConfigManager) getServletContext().getAttribute("ConfigManager");
++        ConfigManager configManager = (ConfigManager) getServletContext().getAttribute(ConfigManager.CONFIG_MANAGER);
+         if (configManager == null) {
+             return;
+         }
+diff --git a/hawtio-system/src/main/java/io/hawt/web/auth/UserServlet.java b/hawtio-system/src/main/java/io/hawt/web/auth/UserServlet.java
+index 8154200782..41529b6da4 100644
+--- a/hawtio-system/src/main/java/io/hawt/web/auth/UserServlet.java
++++ b/hawtio-system/src/main/java/io/hawt/web/auth/UserServlet.java
+@@ -24,9 +24,9 @@ public class UserServlet extends HttpServlet {
+ 
+     @Override
+     public void init() throws ServletException {
+-        config = (ConfigManager) getServletConfig().getServletContext().getAttribute("ConfigManager");
++        config = (ConfigManager) getServletConfig().getServletContext().getAttribute(ConfigManager.CONFIG_MANAGER);
+         if (config != null) {
+-            this.authenticationEnabled = Boolean.parseBoolean(config.get("authenticationEnabled", "true"));
++            this.authenticationEnabled = config.getBoolean(AuthenticationConfiguration.AUTHENTICATION_ENABLED, true);
+         }
+ 
+         // JVM system properties can override always
+diff --git a/hawtio-system/src/main/java/io/hawt/web/auth/keycloak/KeycloakServlet.java b/hawtio-system/src/main/java/io/hawt/web/auth/keycloak/KeycloakServlet.java
+index fa31b6d839..8bf911cbc0 100644
+--- a/hawtio-system/src/main/java/io/hawt/web/auth/keycloak/KeycloakServlet.java
++++ b/hawtio-system/src/main/java/io/hawt/web/auth/keycloak/KeycloakServlet.java
+@@ -40,7 +40,7 @@ public class KeycloakServlet extends HttpServlet {
+ 
+     @Override
+     public void init() throws ServletException {
+-        ConfigManager config = (ConfigManager) getServletContext().getAttribute("ConfigManager");
++        ConfigManager config = (ConfigManager) getServletContext().getAttribute(ConfigManager.CONFIG_MANAGER);
+ 
+         authConfiguration = AuthenticationConfiguration.getConfiguration(getServletContext());
+         keycloakEnabled = authConfiguration.isKeycloakEnabled();
+diff --git a/hawtio-system/src/main/java/io/hawt/web/filters/HttpHeaderFilter.java b/hawtio-system/src/main/java/io/hawt/web/filters/HttpHeaderFilter.java
+index 4792be6e4f..ce02e301c8 100644
+--- a/hawtio-system/src/main/java/io/hawt/web/filters/HttpHeaderFilter.java
++++ b/hawtio-system/src/main/java/io/hawt/web/filters/HttpHeaderFilter.java
+@@ -23,7 +23,7 @@ public HttpHeaderFilter() {
+     }
+ 
+     public void init(FilterConfig filterConfig) throws ServletException {
+-        configManager = (ConfigManager) filterConfig.getServletContext().getAttribute("ConfigManager");
++        configManager = (ConfigManager) filterConfig.getServletContext().getAttribute(ConfigManager.CONFIG_MANAGER);
+     }
+ 
+     public void destroy() {
+diff --git a/hawtio-system/src/main/java/io/hawt/web/proxy/ProxyServlet.java b/hawtio-system/src/main/java/io/hawt/web/proxy/ProxyServlet.java
+index c8088cdee6..51eb4cf276 100644
+--- a/hawtio-system/src/main/java/io/hawt/web/proxy/ProxyServlet.java
++++ b/hawtio-system/src/main/java/io/hawt/web/proxy/ProxyServlet.java
+@@ -20,6 +20,7 @@
+ import javax.servlet.http.HttpServletResponse;
+ import javax.servlet.http.HttpSession;
+ 
++import io.hawt.system.ConfigManager;
+ import io.hawt.system.ProxyWhitelist;
+ import io.hawt.util.Strings;
+ import io.hawt.web.ForbiddenReason;
+@@ -97,7 +98,10 @@ public class ProxyServlet extends HttpServlet {
+     private static final String PROXY_ACCEPT_SELF_SIGNED_CERTS_ENV = "PROXY_DISABLE_CERT_VALIDATION";
+ 
+     public static final String PROXY_WHITELIST = "proxyWhitelist";
++    public static final String LOCAL_ADDRESS_PROBING = "localAddressProbing";
++
+     public static final String HAWTIO_PROXY_WHITELIST = "hawtio." + PROXY_WHITELIST;
++    public static final String HAWTIO_LOCAL_ADDRESS_PROBING = "hawtio." + LOCAL_ADDRESS_PROBING;
+ 
+     /* MISC */
+ 
+@@ -119,11 +123,11 @@ public String getServletInfo() {
+     public void init(ServletConfig servletConfig) throws ServletException {
+         super.init(servletConfig);
+ 
+-        String whitelistStr = servletConfig.getInitParameter(PROXY_WHITELIST);
+-        if (System.getProperty(HAWTIO_PROXY_WHITELIST) != null) {
+-            whitelistStr = System.getProperty(HAWTIO_PROXY_WHITELIST);
+-        }
+-        whitelist = new ProxyWhitelist(whitelistStr);
++        ConfigManager config = (ConfigManager) getServletContext().getAttribute(ConfigManager.CONFIG_MANAGER);
++
++        String whitelistStr = config.get(PROXY_WHITELIST, servletConfig.getInitParameter(PROXY_WHITELIST));
++        boolean probeLocal = config.getBoolean(LOCAL_ADDRESS_PROBING, true);
++        whitelist = new ProxyWhitelist(whitelistStr, probeLocal);
+ 
+         String doForwardIPString = servletConfig.getInitParameter(P_FORWARDEDFOR);
+         if (doForwardIPString != null) {

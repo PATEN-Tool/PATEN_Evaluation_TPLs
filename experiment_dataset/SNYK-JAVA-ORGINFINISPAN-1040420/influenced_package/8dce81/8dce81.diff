@@ -1,0 +1,207 @@
+diff --git a/server/rest/src/main/java/org/infinispan/rest/RestServer.java b/server/rest/src/main/java/org/infinispan/rest/RestServer.java
+index 7cbfcfb68d3e..d2d57f5de63f 100644
+--- a/server/rest/src/main/java/org/infinispan/rest/RestServer.java
++++ b/server/rest/src/main/java/org/infinispan/rest/RestServer.java
+@@ -123,7 +123,7 @@ protected void startInternal() {
+       resourceManager.registerResource(restContext, new SearchAdminResource(invocationHelper));
+       resourceManager.registerResource(restContext, new TasksResource(invocationHelper));
+       resourceManager.registerResource(restContext, new ProtobufResource(invocationHelper));
+-      resourceManager.registerResource(rootContext, new MetricsResource());
++      resourceManager.registerResource(rootContext, new MetricsResource(auth.metricsAuth()));
+       Path staticResources = configuration.staticResources();
+       if (staticResources != null) {
+          Path console = configuration.staticResources().resolve("console");
+diff --git a/server/rest/src/main/java/org/infinispan/rest/configuration/AuthenticationConfiguration.java b/server/rest/src/main/java/org/infinispan/rest/configuration/AuthenticationConfiguration.java
+index de2f9648377f..eb2ea72f11fd 100644
+--- a/server/rest/src/main/java/org/infinispan/rest/configuration/AuthenticationConfiguration.java
++++ b/server/rest/src/main/java/org/infinispan/rest/configuration/AuthenticationConfiguration.java
+@@ -20,6 +20,7 @@
+ public class AuthenticationConfiguration implements ConfigurationInfo {
+    public static final AttributeDefinition<String> SECURITY_REALM = AttributeDefinition.builder("securityRealm", null, String.class).immutable().build();
+    public static final AttributeDefinition<List<String>> MECHANISMS = AttributeDefinition.builder("mechanisms", null, (Class<List<String>>) (Class<?>) List.class).initializer(ArrayList::new).immutable().build();
++   public static final AttributeDefinition<Boolean> METRICS_AUTH = AttributeDefinition.builder("metrics-auth", true, Boolean.class).build();
+ 
+    static final ElementDefinition ELEMENT_DEFINITION = new DefaultElementDefinition("authentication");
+ 
+@@ -30,7 +31,7 @@ public class AuthenticationConfiguration implements ConfigurationInfo {
+    private final AttributeSet attributes;
+ 
+    public static AttributeSet attributeDefinitionSet() {
+-      return new AttributeSet(AuthenticationConfiguration.class, MECHANISMS, SECURITY_REALM);
++      return new AttributeSet(AuthenticationConfiguration.class, MECHANISMS, SECURITY_REALM, METRICS_AUTH);
+    }
+ 
+    AuthenticationConfiguration(AttributeSet attributes, Authenticator authenticator, Boolean enabled) {
+@@ -62,6 +63,10 @@ public Authenticator authenticator() {
+       return authenticator;
+    }
+ 
++   public boolean metricsAuth() {
++      return attributes.attribute(METRICS_AUTH).get();
++   }
++
+    @Override
+    public String toString() {
+       return "AuthenticationConfiguration{" +
+diff --git a/server/rest/src/main/java/org/infinispan/rest/configuration/AuthenticationConfigurationBuilder.java b/server/rest/src/main/java/org/infinispan/rest/configuration/AuthenticationConfigurationBuilder.java
+index 9d42aca25b3f..158e2d814879 100644
+--- a/server/rest/src/main/java/org/infinispan/rest/configuration/AuthenticationConfigurationBuilder.java
++++ b/server/rest/src/main/java/org/infinispan/rest/configuration/AuthenticationConfigurationBuilder.java
+@@ -1,6 +1,7 @@
+ package org.infinispan.rest.configuration;
+ 
+ import static org.infinispan.rest.configuration.AuthenticationConfiguration.MECHANISMS;
++import static org.infinispan.rest.configuration.AuthenticationConfiguration.METRICS_AUTH;
+ import static org.infinispan.rest.configuration.AuthenticationConfiguration.SECURITY_REALM;
+ 
+ import java.util.List;
+@@ -72,6 +73,12 @@ public boolean hasMechanisms() {
+       return !attributes.attribute(MECHANISMS).get().isEmpty();
+    }
+ 
++
++   public AuthenticationConfigurationBuilder metricsAuth(boolean metricsAuth) {
++      attributes.attribute(METRICS_AUTH).set(metricsAuth);
++      return this;
++   }
++
+    @Override
+    public void validate() {
+       if (enabled && authenticator == null) {
+diff --git a/server/rest/src/main/java/org/infinispan/rest/resources/MetricsResource.java b/server/rest/src/main/java/org/infinispan/rest/resources/MetricsResource.java
+index b06b413395f8..95d5d5c3b570 100644
+--- a/server/rest/src/main/java/org/infinispan/rest/resources/MetricsResource.java
++++ b/server/rest/src/main/java/org/infinispan/rest/resources/MetricsResource.java
+@@ -40,9 +40,11 @@ public final class MetricsResource implements ResourceHandler {
+    private static final String METRICS_PATH = "/metrics";
+ 
+    private final MetricsRequestHandler requestHandler = new MetricsRequestHandler();
++   private final boolean auth;
+ 
+-   public MetricsResource() {
++   public MetricsResource(boolean auth) {
+       registerBaseMetrics();
++      this.auth = auth;
+    }
+ 
+    // this is kept separate just in case Quarkus needs to replace it with nil
+@@ -59,8 +61,8 @@ private void registerBaseMetrics() {
+    @Override
+    public Invocations getInvocations() {
+       return new Invocations.Builder()
+-            .invocation().methods(GET, OPTIONS).path(METRICS_PATH).handleWith(this::metrics)
+-            .invocation().methods(GET, OPTIONS).path(METRICS_PATH + "/*").handleWith(this::metrics)
++            .invocation().methods(GET, OPTIONS).path(METRICS_PATH).anonymous(!auth).handleWith(this::metrics)
++            .invocation().methods(GET, OPTIONS).path(METRICS_PATH + "/*").anonymous(!auth).handleWith(this::metrics)
+             .create();
+    }
+ 
+diff --git a/server/runtime/src/main/java/org/infinispan/server/configuration/Attribute.java b/server/runtime/src/main/java/org/infinispan/server/configuration/Attribute.java
+index d4ff8b20f45d..bc7f0ab72b1d 100644
+--- a/server/runtime/src/main/java/org/infinispan/server/configuration/Attribute.java
++++ b/server/runtime/src/main/java/org/infinispan/server/configuration/Attribute.java
+@@ -102,7 +102,8 @@ public enum Attribute {
+    BACKGROUND_VALIDATION,
+    LEAK_DETECTION,
+    IDLE_REMOVAL,
+-   ADMIN;
++   ADMIN,
++   METRICS_AUTH;
+ 
+    private static final Map<String, Attribute> ATTRIBUTES;
+ 
+diff --git a/server/runtime/src/main/java/org/infinispan/server/configuration/ServerConfigurationParser.java b/server/runtime/src/main/java/org/infinispan/server/configuration/ServerConfigurationParser.java
+index d288ad3d9098..494262da2e51 100644
+--- a/server/runtime/src/main/java/org/infinispan/server/configuration/ServerConfigurationParser.java
++++ b/server/runtime/src/main/java/org/infinispan/server/configuration/ServerConfigurationParser.java
+@@ -1116,6 +1116,9 @@ private void parseEndpoints(XMLExtendedStreamReader reader, ConfigurationBuilder
+             case ADMIN:
+                endpoint.admin(Boolean.parseBoolean(value));
+                break;
++            case METRICS_AUTH:
++               endpoint.metricsAuth(Boolean.parseBoolean(value));
++               break;
+             case SECURITY_REALM:
+                // Set the endpoint security realm and fall-through. Starting with 11.0 we also enable implicit authentication configuration
+                endpoint.securityRealm(value).implicitConnectorSecurity(reader.getSchema().since(11, 0));
+diff --git a/server/runtime/src/main/java/org/infinispan/server/configuration/endpoint/EndpointConfiguration.java b/server/runtime/src/main/java/org/infinispan/server/configuration/endpoint/EndpointConfiguration.java
+index 370ed178185b..5edecbc9b355 100644
+--- a/server/runtime/src/main/java/org/infinispan/server/configuration/endpoint/EndpointConfiguration.java
++++ b/server/runtime/src/main/java/org/infinispan/server/configuration/endpoint/EndpointConfiguration.java
+@@ -19,13 +19,14 @@ public class EndpointConfiguration implements ConfigurationInfo {
+    static final AttributeDefinition<String> SOCKET_BINDING = AttributeDefinition.builder("socket-binding", null, String.class).build();
+    static final AttributeDefinition<String> SECURITY_REALM = AttributeDefinition.builder("security-realm", null, String.class).build();
+    static final AttributeDefinition<Boolean> ADMIN = AttributeDefinition.builder("admin", true, Boolean.class).build();
++   static final AttributeDefinition<Boolean> METRICS_AUTH = AttributeDefinition.builder("metrics-auth", true, Boolean.class).build();
+ 
+    private final List<ProtocolServerConfiguration> connectors;
+    private final SinglePortRouterConfiguration singlePort;
+ 
+ 
+    static AttributeSet attributeDefinitionSet() {
+-      return new AttributeSet(EndpointConfiguration.class, SOCKET_BINDING, SECURITY_REALM, ADMIN);
++      return new AttributeSet(EndpointConfiguration.class, SOCKET_BINDING, SECURITY_REALM, ADMIN, METRICS_AUTH);
+    }
+ 
+    private static final ElementDefinition ELEMENT_DEFINITION = new DefaultElementDefinition(Element.ENDPOINTS.toString());
+@@ -60,6 +61,10 @@ public boolean admin() {
+       return attributes.attribute(ADMIN).get();
+    }
+ 
++   public boolean metricsAuth() {
++      return attributes.attribute(METRICS_AUTH).get();
++   }
++
+    @Override
+    public ElementDefinition getElementDefinition() {
+       return ELEMENT_DEFINITION;
+diff --git a/server/runtime/src/main/java/org/infinispan/server/configuration/endpoint/EndpointConfigurationBuilder.java b/server/runtime/src/main/java/org/infinispan/server/configuration/endpoint/EndpointConfigurationBuilder.java
+index 616c77d32a8d..bef29db23e7d 100644
+--- a/server/runtime/src/main/java/org/infinispan/server/configuration/endpoint/EndpointConfigurationBuilder.java
++++ b/server/runtime/src/main/java/org/infinispan/server/configuration/endpoint/EndpointConfigurationBuilder.java
+@@ -55,6 +55,15 @@ public boolean admin() {
+       return attributes.attribute(EndpointConfiguration.ADMIN).get();
+    }
+ 
++   public EndpointConfigurationBuilder metricsAuth(boolean auth) {
++      attributes.attribute(EndpointConfiguration.METRICS_AUTH).set(auth);
++      return this;
++   }
++
++   public boolean metricsAuth() {
++      return attributes.attribute(EndpointConfiguration.METRICS_AUTH).get();
++   }
++
+    public List<ProtocolServerConfigurationBuilder<?, ?>> connectors() {
+       return connectorBuilders;
+    }
+diff --git a/server/runtime/src/main/java/org/infinispan/server/configuration/rest/RestServerConfigurationParser.java b/server/runtime/src/main/java/org/infinispan/server/configuration/rest/RestServerConfigurationParser.java
+index e97663417ca3..65a41ebe1c6a 100644
+--- a/server/runtime/src/main/java/org/infinispan/server/configuration/rest/RestServerConfigurationParser.java
++++ b/server/runtime/src/main/java/org/infinispan/server/configuration/rest/RestServerConfigurationParser.java
+@@ -84,6 +84,7 @@ private void parseRest(XMLExtendedStreamReader reader, ServerConfigurationBuilde
+          String serverHome = reader.getProperties().getProperty(Server.INFINISPAN_SERVER_HOME_PATH);
+          builder.staticResources(Paths.get(serverHome, Server.DEFAULT_SERVER_STATIC_DIR));
+       }
++      builder.authentication().metricsAuth(endpoint.metricsAuth());
+       for (int i = 0; i < reader.getAttributeCount(); i++) {
+          ParseUtils.requireNoNamespaceAttribute(reader, i);
+          String value = replaceProperties(reader.getAttributeValue(i));
+diff --git a/server/runtime/src/main/resources/schema/infinispan-server-12.0.xsd b/server/runtime/src/main/resources/schema/infinispan-server-12.0.xsd
+index bb2535a9714c..a82df3093b45 100644
+--- a/server/runtime/src/main/resources/schema/infinispan-server-12.0.xsd
++++ b/server/runtime/src/main/resources/schema/infinispan-server-12.0.xsd
+@@ -313,7 +313,12 @@
+             </xs:attribute>
+             <xs:attribute name="admin" type="xs:boolean" default="true">
+                <xs:annotation>
+-                  <xs:documentation>Enable/disable administrative features on this endpoint. Defaults to true.</xs:documentation>
++                  <xs:documentation>Enable administrative features on this endpoint. Defaults to true.</xs:documentation>
++               </xs:annotation>
++            </xs:attribute>
++            <xs:attribute name="metrics-auth" type="xs:boolean" default="true">
++               <xs:annotation>
++                  <xs:documentation>Enable metrics authentication on this endpoint. Defaults to true.</xs:documentation>
+                </xs:annotation>
+             </xs:attribute>
+          </xs:extension>

@@ -1,0 +1,421 @@
+diff --git a/package/src/main/resources/etc/org.ops4j.pax.logging.cfg b/package/src/main/resources/etc/org.ops4j.pax.logging.cfg
+index cdd01655b..fe5433c20 100644
+--- a/package/src/main/resources/etc/org.ops4j.pax.logging.cfg
++++ b/package/src/main/resources/etc/org.ops4j.pax.logging.cfg
+@@ -18,7 +18,7 @@
+ ################################################################################
+ 
+ # Common pattern layout for appenders
+-log4j2.pattern = %d{ISO8601} | %-5p | %-16t | %-32c{1} | %X{bundle.id} - %X{bundle.name} - %X{bundle.version} | %m%n
++log4j2.pattern = %d{ISO8601} | %-5p | %-16t | %-32c{1} | %X{bundle.id} - %X{bundle.name} - %X{bundle.version} | %encode{ %.-500m }{CRLF}%n
+ 
+ # Root logger
+ log4j2.rootLogger.level = ${org.apache.unomi.logs.root.level:-INFO}
+diff --git a/persistence-elasticsearch/core/src/main/java/org/apache/unomi/persistence/elasticsearch/ElasticSearchPersistenceServiceImpl.java b/persistence-elasticsearch/core/src/main/java/org/apache/unomi/persistence/elasticsearch/ElasticSearchPersistenceServiceImpl.java
+index 5932cf8df..dc6805694 100644
+--- a/persistence-elasticsearch/core/src/main/java/org/apache/unomi/persistence/elasticsearch/ElasticSearchPersistenceServiceImpl.java
++++ b/persistence-elasticsearch/core/src/main/java/org/apache/unomi/persistence/elasticsearch/ElasticSearchPersistenceServiceImpl.java
+@@ -1463,7 +1463,11 @@ public boolean isValidCondition(Condition condition, Item item) {
+                     .must(QueryBuilders.idsQuery().addIds(item.getItemId()))
+                     .must(conditionESQueryBuilderDispatcher.buildFilter(condition));
+         } catch (Exception e) {
+-            logger.error("Failed to validate condition, condition={}", condition, e);
++            logger.error("Failed to validate condition. See debug log level for more information");
++            if (logger.isDebugEnabled()) {
++                logger.debug("Failed to validate condition, condition={}", condition, e);
++            }
++
+             return false;
+         }
+         return true;
+diff --git a/persistence-elasticsearch/core/src/main/java/org/apache/unomi/persistence/elasticsearch/conditions/ConditionESQueryBuilderDispatcher.java b/persistence-elasticsearch/core/src/main/java/org/apache/unomi/persistence/elasticsearch/conditions/ConditionESQueryBuilderDispatcher.java
+index be2535c39..97fb8109a 100644
+--- a/persistence-elasticsearch/core/src/main/java/org/apache/unomi/persistence/elasticsearch/conditions/ConditionESQueryBuilderDispatcher.java
++++ b/persistence-elasticsearch/core/src/main/java/org/apache/unomi/persistence/elasticsearch/conditions/ConditionESQueryBuilderDispatcher.java
+@@ -86,7 +86,11 @@ public QueryBuilder buildFilter(Condition condition, Map<String, Object> context
+         }
+ 
+         // if no matching
+-        logger.warn("No matching query builder for condition {} and context {}", condition, context);
++        logger.warn("No matching query builder. See debug log level for more information");
++        if (logger.isDebugEnabled()) {
++            logger.debug("No matching query builder for condition {} and context {}", condition, context);
++        }
++
+         return QueryBuilders.matchAllQuery();
+     }
+ 
+@@ -118,7 +122,10 @@ public long count(Condition condition, Map<String, Object> context) {
+         }
+ 
+         // if no matching
+-        logger.warn("No matching query builder for condition {} and context {}", condition, context);
++        logger.warn("No matching query builder. See debug log level for more information");
++        if (logger.isDebugEnabled()) {
++            logger.debug("No matching query builder for condition {} and context {}", condition, context);
++        }
+         throw new UnsupportedOperationException();
+     }
+ }
+diff --git a/persistence-elasticsearch/core/src/main/resources/log4j2.xml b/persistence-elasticsearch/core/src/main/resources/log4j2.xml
+index dfb279b82..3bf63c3f3 100644
+--- a/persistence-elasticsearch/core/src/main/resources/log4j2.xml
++++ b/persistence-elasticsearch/core/src/main/resources/log4j2.xml
+@@ -18,7 +18,7 @@
+ <Configuration status="WARN">
+     <Appenders>
+         <Console name="Console" target="SYSTEM_OUT">
+-            <PatternLayout pattern="%d{HH:mm:ss.SSS} [%t] %-5level %logger{36} - %msg%n"/>
++            <PatternLayout pattern="%d{HH:mm:ss.SSS} [%t] %-5level %logger{36} - %encode{ %.-500m }{CRLF}%n"/>
+         </Console>
+     </Appenders>
+     <Loggers>
+diff --git a/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/actions/ModifyConsentAction.java b/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/actions/ModifyConsentAction.java
+index 7facccf3a..3ebb0342a 100644
+--- a/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/actions/ModifyConsentAction.java
++++ b/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/actions/ModifyConsentAction.java
+@@ -52,7 +52,10 @@ public int execute(Action action, Event event) {
+                     consent = new Consent(consentMap, dateFormat);
+                     isProfileUpdated = profile.setConsent(consent);
+                 } catch (ParseException e) {
+-                    logger.error("Error parsing date format", e);
++                    logger.error("Error parsing consent dates (statusDate or revokeDate). See debug log level to have more information");
++                    if (logger.isDebugEnabled()) {
++                        logger.debug("Error parsing consent dates (statusDate or revokeDate).", e);
++                    }
+                 }
+             } else {
+                 logger.warn("Event properties for modifyConsent is missing typeIdentifier and grant properties. We will ignore this event.");
+diff --git a/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/actions/SetPropertyAction.java b/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/actions/SetPropertyAction.java
+index 1e89e0b26..15f421656 100644
+--- a/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/actions/SetPropertyAction.java
++++ b/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/actions/SetPropertyAction.java
+@@ -77,8 +77,8 @@ public int execute(Action action, Event event) {
+             Date date = new Date();
+             Date firstVisit = new Date();
+ 
++            Object propertyFirstVisit = event.getProfile().getProperties().get("firstVisit");
+             try {
+-                Object propertyFirstVisit = event.getProfile().getProperties().get("firstVisit");
+                 if (propertyFirstVisit != null) {
+                     if (propertyFirstVisit instanceof String) {
+                         firstVisit = format.parse((String) propertyFirstVisit);
+@@ -93,7 +93,10 @@ public int execute(Action action, Event event) {
+                     date = event.getTimeStamp();
+                 }
+             } catch (ParseException e) {
+-                logger.error("Error to parse date", e);
++                logger.error("Error parsing firstVisit date property. See debug log level for more information");
++                if (logger.isDebugEnabled()) {
++                    logger.debug("Error parsing date: {}", propertyFirstVisit, e);
++                }
+             }
+ 
+             propertyValue = format.format(date);
+diff --git a/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/BooleanConditionESQueryBuilder.java b/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/BooleanConditionESQueryBuilder.java
+index 574fcc831..b27c5ef6d 100644
+--- a/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/BooleanConditionESQueryBuilder.java
++++ b/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/BooleanConditionESQueryBuilder.java
+@@ -60,14 +60,20 @@ public QueryBuilder buildQuery(Condition condition, Map<String, Object> context,
+                         boolQueryBuilder.must(andFilter);
+                     }
+                 } else {
+-                    logger.warn("Null filter for boolean AND sub condition " + conditions.get(i));
++                    logger.warn("Null filter for boolean AND sub condition. See debug log level for more information");
++                    if (logger.isDebugEnabled()) {
++                        logger.debug("Null filter for boolean AND sub condition {}", conditions.get(i));
++                    }
+                 }
+             } else {
+                 QueryBuilder orFilter = dispatcher.buildFilter(conditions.get(i), context);
+                 if (orFilter != null) {
+                     boolQueryBuilder.should(orFilter);
+                 } else {
+-                    logger.warn("Null filter for boolean OR sub condition " + conditions.get(i));
++                    logger.warn("Null filter for boolean OR sub condition. See debug log level for more information");
++                    if (logger.isDebugEnabled()) {
++                        logger.debug("Null filter for boolean OR sub condition {}", conditions.get(i));
++                    }
+                 }
+             }
+         }
+diff --git a/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/HardcodedPropertyAccessorRegistry.java b/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/HardcodedPropertyAccessorRegistry.java
+index 56f8cd582..ed0d5c1d6 100644
+--- a/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/HardcodedPropertyAccessorRegistry.java
++++ b/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/HardcodedPropertyAccessorRegistry.java
+@@ -134,7 +134,10 @@ public Object getProperty(Object object, String expression) {
+                 }
+             }
+         }
+-        logger.warn("Couldn't find any property access for class {} and expression {}", object.getClass().getName(), expression);
++        logger.warn("Couldn't find any property access for class {}. See debug log level for more information", object.getClass().getName());
++        if (logger.isDebugEnabled()) {
++            logger.debug("Couldn't find any property access for class {} and expression {}", object.getClass().getName(), expression);
++        }
+         return HardcodedPropertyAccessor.PROPERTY_NOT_FOUND_MARKER;
+     }
+ 
+diff --git a/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/PropertyConditionEvaluator.java b/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/PropertyConditionEvaluator.java
+index a3cc0d0d5..5dfee9f51 100644
+--- a/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/PropertyConditionEvaluator.java
++++ b/plugins/baseplugin/src/main/java/org/apache/unomi/plugins/baseplugin/conditions/PropertyConditionEvaluator.java
+@@ -184,7 +184,10 @@ public boolean eval(Condition condition, Item item, Map<String, Object> context,
+                 if (!(e instanceof OgnlException)
+                         || (!StringUtils.startsWith(e.getMessage(),
+                         "source is null for getProperty(null"))) {
+-                    logger.warn("Error evaluating value for " + item.getClass().getName() + " " + name, e);
++                    logger.warn("Error evaluating value for {} {}. See debug level for more information", item.getClass().getName(), name);
++                    if (logger.isDebugEnabled()) {
++                        logger.debug("Error evaluating value for {} {}", item.getClass().getName(), name, e);
++                    }
+                 }
+                 actualValue = null;
+             }
+@@ -274,7 +277,10 @@ protected Object getPropertyValue(Item item, String expression) throws Exception
+         if (useOGNLScripting) {
+             return getOGNLPropertyValue(item, expression);
+         } else {
+-            logger.warn("OGNL Off. Expression not evaluated on item {} : {}", item.getClass().getName(), expression);
++            logger.warn("OGNL Off. Expression not evaluated on item {}. See debug log level for more information", item.getClass().getName());
++            if (logger.isDebugEnabled()) {
++                logger.debug("OGNL Off. Expression not evaluated on item {}: {}", item.getClass().getName(), expression);
++            }
+             return null;
+         }
+     }
+@@ -287,7 +293,10 @@ protected Object getHardcodedPropertyValue(Item item, String expression) {
+ 
+     protected Object getOGNLPropertyValue(Item item, String expression) throws Exception {
+         if (expressionFilterFactory.getExpressionFilter("ognl").filter(expression) == null) {
+-            logger.warn("Expression {} is not allowed !", expression);
++            logger.warn("OGNL expression filtered because not allowed on item: {}. See debug log level for more information", item.getClass().getName());
++            if (logger.isDebugEnabled()) {
++                logger.debug("OGNL expression filtered because not allowed: {}", expression);
++            }
+             return null;
+         }
+         OgnlContext ognlContext = getOgnlContext(secureFilteringClassLoader);
+@@ -296,7 +305,11 @@ protected Object getOGNLPropertyValue(Item item, String expression) throws Excep
+             try {
+                 return accessor.get(ognlContext, item);
+             } catch (Throwable t) {
+-                logger.error("Error evaluating expression {} on item {} : {}", expression, item.getClass().getName(), t);
++                logger.error("Error evaluating expression on item {}. See debug level for more information", item.getClass().getName());
++                if (logger.isDebugEnabled()) {
++                    logger.debug("Error evaluating expression {} on item {}.", expression, item.getClass().getName(), t);
++                }
++
+                 return null;
+             }
+         }
+@@ -330,15 +343,17 @@ public void restore(Map context, Object target, Member member, String propertyNa
+                     @Override
+                     public boolean isAccessible(Map context, Object target, Member member, String propertyName) {
+                         int modifiers = member.getModifiers();
+-                        if (target instanceof Item) {
+-                            if ("getClass".equals(member.getName())) {
+-                                logger.warn("Target {} and member {} for property {} are not allowed by OGNL security filter", target, member, propertyName);
+-                                return false;
++                        boolean accessible = false;
++                        if (target instanceof Item && !"getClass".equals(member.getName())) {
++                            accessible = Modifier.isPublic(modifiers);
++                        }
++                        if (!accessible) {
++                            logger.warn("OGNL security filtered target, member for property. See debug log level for more information");
++                            if (logger.isDebugEnabled()) {
++                                logger.debug("OGNL security filtered: Target {} and member {} for property {}. Not allowed", target, member, propertyName);
+                             }
+-                            return Modifier.isPublic(modifiers);
+                         }
+-                        logger.warn("Target {} and member {} for property {} are not allowed by OGNL security filter", target, member, propertyName);
+-                        return false;
++                        return accessible;
+                     }
+                 }, new ClassLoaderClassResolver(classLoader),
+                 null);
+@@ -368,11 +383,16 @@ private ExpressionAccessor getPropertyAccessor(Item item, String expression, Ogn
+             if (accessor != null) {
+                 expressions.put(expression, accessor);
+             } else {
+-                logger.warn("Unable to compile expression for {} and {}", clazz, expression);
++                logger.warn("Unable to compile expression for {}. See debug log level for more information", clazz);
++                if (logger.isDebugEnabled()) {
++                    logger.debug("Unable to compile expression: {} for: {}", expression, clazz);
++                }
+             }
+-            if (logger.isInfoEnabled()) {
+-                time = System.nanoTime() - time;
+-                logger.info("Expression compilation for item={} expression={} took {}", item.getClass().getName(), expression, time / 1000000L);
++            time = System.nanoTime() - time;
++            if (logger.isDebugEnabled()) {
++                logger.debug("Expression compilation for item={} expression={} took {}", item.getClass().getName(), expression, time / 1000000L);
++            } else if (logger.isInfoEnabled()) {
++                logger.info("Expression compilation for item={} took {}. See debug log level for more information", item.getClass().getName(), time / 1000000L);
+             }
+         }
+ 
+@@ -390,7 +410,10 @@ private Date getDate(Object value) {
+             try {
+                 return Date.from(parser.parse(value.toString(), System::currentTimeMillis));
+             } catch (ElasticsearchParseException e) {
+-                logger.warn("unable to parse date " + value.toString(), e);
++                logger.warn("unable to parse date. See debug log level for full stacktrace");
++                if (logger.isDebugEnabled()) {
++                    logger.debug("unable to parse date {}", value.toString(), e);
++                }
+             }
+         }
+         return null;
+diff --git a/plugins/request/src/main/java/org/apache/unomi/plugins/request/actions/SetRemoteHostInfoAction.java b/plugins/request/src/main/java/org/apache/unomi/plugins/request/actions/SetRemoteHostInfoAction.java
+index d18aa5631..58527fed7 100644
+--- a/plugins/request/src/main/java/org/apache/unomi/plugins/request/actions/SetRemoteHostInfoAction.java
++++ b/plugins/request/src/main/java/org/apache/unomi/plugins/request/actions/SetRemoteHostInfoAction.java
+@@ -232,9 +232,9 @@ private boolean ipLookupInDatabase(String remoteAddr, Session session) {
+             }
+             return true;
+         } catch (IOException | GeoIp2Exception e) {
+-            logger.warn("Cannot resolve IP {}, enable debug log level for complete stacktrace", remoteAddr);
++            logger.warn("Cannot resolve IP, enable debug log level for complete stacktrace");
+             if (logger.isDebugEnabled()) {
+-                logger.debug("Cannot resolve IP", e);
++                logger.debug("Cannot resolve IP: {}", remoteAddr, e);
+             }
+         }
+         return false;
+@@ -246,9 +246,9 @@ private static boolean isAValidIPAddress(String remoteAddr) {
+             try {
+                 addr = InetAddress.getByName(remoteAddr);
+             } catch (UnknownHostException e) {
+-                logger.warn("Cannot resolve IP {}, enable debug log level for complete stacktrace", remoteAddr);
++                logger.warn("Cannot resolve IP, enable debug log level for complete stacktrace");
+                 if (logger.isDebugEnabled()) {
+-                    logger.debug("Cannot resolve IP", e);
++                    logger.debug("Cannot resolve IP: {}", remoteAddr, e);
+                 }
+                 return false;
+             }
+diff --git a/rest/src/main/java/org/apache/unomi/rest/ClusterServiceEndPoint.java b/rest/src/main/java/org/apache/unomi/rest/ClusterServiceEndPoint.java
+index 21134e21e..1bb01e34b 100644
+--- a/rest/src/main/java/org/apache/unomi/rest/ClusterServiceEndPoint.java
++++ b/rest/src/main/java/org/apache/unomi/rest/ClusterServiceEndPoint.java
+@@ -86,7 +86,10 @@ public void purge(@PathParam("date") String date) {
+         try {
+             clusterService.purge(new SimpleDateFormat("yyyy-MM-dd").parse(date));
+         } catch (ParseException e) {
+-            logger.error("Cannot purge",e);
++            logger.error("Cannot parse date, expected format is: yyyy-MM-dd. See debug log level for more information");
++            if (logger.isDebugEnabled()) {
++                logger.debug("Cannot parse date: {}", date, e);
++            }
+         }
+     }
+ 
+diff --git a/scripting/src/main/java/org/apache/unomi/scripting/ExpressionFilter.java b/scripting/src/main/java/org/apache/unomi/scripting/ExpressionFilter.java
+index 74d497429..87669aa64 100644
+--- a/scripting/src/main/java/org/apache/unomi/scripting/ExpressionFilter.java
++++ b/scripting/src/main/java/org/apache/unomi/scripting/ExpressionFilter.java
+@@ -38,11 +38,19 @@ public ExpressionFilter(Set<Pattern> allowedExpressionPatterns, Set<Pattern> for
+ 
+     public String filter(String expression) {
+         if (forbiddenExpressionPatterns != null && expressionMatches(expression, forbiddenExpressionPatterns)) {
+-            logger.warn("Expression {} is forbidden by expression filter", expression);
++            logger.warn("Expression filtered because forbidden. See debug log level for more information");
++            if (logger.isDebugEnabled()) {
++                logger.debug("Expression {} is forbidden by expression filter", expression);
++            }
++
+             return null;
+         }
+         if (allowedExpressionPatterns != null && !expressionMatches(expression, allowedExpressionPatterns)) {
+-            logger.warn("Expression {} is not allowed by expression filter", expression);
++            logger.warn("Expression filtered because not allowed. See debug log level for more information");
++            if (logger.isDebugEnabled()) {
++                logger.debug("Expression {} is not allowed by expression filter", expression);
++            }
++
+             return null;
+         }
+         return expression;
+diff --git a/wab/src/main/java/org/apache/unomi/web/ContextServlet.java b/wab/src/main/java/org/apache/unomi/web/ContextServlet.java
+index f45a8915d..2c376113f 100644
+--- a/wab/src/main/java/org/apache/unomi/web/ContextServlet.java
++++ b/wab/src/main/java/org/apache/unomi/web/ContextServlet.java
+@@ -75,7 +75,13 @@ public void service(HttpServletRequest request, HttpServletResponse response) th
+         try {
+             final Date timestamp = new Date();
+             if (request.getParameter("timestamp") != null) {
+-                timestamp.setTime(Long.parseLong(request.getParameter("timestamp")));
++                try {
++                    timestamp.setTime(Long.parseLong(request.getParameter("timestamp")));
++                } catch (NumberFormatException e) {
++                    // catch to avoid logging the error with the timestamp value to avoid potential log injection
++                    logger.error("Invalid timestamp parameter");
++                    return;
++                }
+             }
+ 
+             // set up CORS headers as soon as possible so that errors are not misconstrued on the client for CORS errors
+@@ -98,7 +104,7 @@ public void service(HttpServletRequest request, HttpServletResponse response) th
+             if (personaId != null) {
+                 PersonaWithSessions personaWithSessions = profileService.loadPersonaWithSessions(personaId);
+                 if (personaWithSessions == null) {
+-                    logger.error("Couldn't find persona with id=" + personaId);
++                    logger.error("Couldn't find persona, please check your personaId parameter");
+                     profile = null;
+                 } else {
+                     profile = personaWithSessions.getPersona();
+@@ -119,7 +125,10 @@ public void service(HttpServletRequest request, HttpServletResponse response) th
+                     contextRequest = mapper.readValue(factory.createParser(stringPayload), ContextRequest.class);
+                 } catch (Exception e) {
+                     ((HttpServletResponse)response).sendError(HttpServletResponse.SC_BAD_REQUEST, "Check logs for more details");
+-                    logger.error("Cannot read payload " + stringPayload, e);
++                    logger.error("Cannot deserialize the context request payload. See debug level for more information");
++                    if (logger.isDebugEnabled()) {
++                        logger.debug("Cannot deserialize the context request payload: {}", stringPayload, e);
++                    }
+                     return;
+                 }
+                 if (contextRequest.getSource() != null) {
+@@ -530,7 +539,10 @@ private Object sanitizeValue(Object value) {
+         if (value instanceof String) {
+             String stringValue = (String) value;
+             if (stringValue.startsWith("script::") || stringValue.startsWith("parameter::")) {
+-                logger.warn("Scripting detected in context request with value {}, filtering out...", value);
++                logger.warn("Scripting detected in context request, filtering out. See debug level for more information");
++                if (logger.isDebugEnabled()) {
++                    logger.debug("Scripting detected in context request with value {}, filtering out...", value);
++                }
+                 return null;
+             } else {
+                 return stringValue;
+diff --git a/wab/src/main/java/org/apache/unomi/web/EventsCollectorServlet.java b/wab/src/main/java/org/apache/unomi/web/EventsCollectorServlet.java
+index 313b25b98..94c3d62fd 100644
+--- a/wab/src/main/java/org/apache/unomi/web/EventsCollectorServlet.java
++++ b/wab/src/main/java/org/apache/unomi/web/EventsCollectorServlet.java
+@@ -96,7 +96,13 @@ protected void doOptions(HttpServletRequest request, HttpServletResponse respons
+     private void doEvent(HttpServletRequest request, HttpServletResponse response) throws IOException {
+         Date timestamp = new Date();
+         if (request.getParameter("timestamp") != null) {
+-            timestamp.setTime(Long.parseLong(request.getParameter("timestamp")));
++            try {
++                timestamp.setTime(Long.parseLong(request.getParameter("timestamp")));
++            } catch (NumberFormatException e) {
++                // catch to avoid logging the error with the timestamp value to avoid potential log injection
++                logger.error("Invalid timestamp parameter");
++                return;
++            }
+         }
+ 
+         HttpUtils.setupCORSHeaders(request, response);
+@@ -115,7 +121,10 @@ private void doEvent(HttpServletRequest request, HttpServletResponse response) t
+             eventsCollectorRequest = mapper.readValue(factory.createParser(payload), EventsCollectorRequest.class);
+         } catch (Exception e) {
+             response.sendError(HttpServletResponse.SC_BAD_REQUEST, "Check logs for more details");
+-            logger.error("Cannot read payload " + payload, e);
++            logger.error("Cannot read payload. See debug level for more information");
++            if (logger.isDebugEnabled()) {
++                logger.debug("Cannot read payload: {}", payload, e);
++            }
+             return;
+         }
+         if (eventsCollectorRequest == null || eventsCollectorRequest.getEvents() == null) {

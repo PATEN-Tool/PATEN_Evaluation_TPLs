@@ -1,0 +1,16 @@
+diff --git a/java/org/apache/coyote/http2/Http2UpgradeHandler.java b/java/org/apache/coyote/http2/Http2UpgradeHandler.java
+index 58620fda582..170e6c911aa 100644
+--- a/java/org/apache/coyote/http2/Http2UpgradeHandler.java
++++ b/java/org/apache/coyote/http2/Http2UpgradeHandler.java
+@@ -811,8 +811,10 @@ int reserveWindowSize(Stream stream, int reservation, boolean block) throws IOEx
+                                 stream.wait(writeTimeout);
+                             }
+                             // Has this stream been granted an allocation
++                            // Note: If the stream in not in this Map then the
++                            //       requested write has been fully allocated
+                             int[] value = backLogStreams.get(stream);
+-                            if (value[1] == 0) {
++                            if (value != null && value[1] == 0) {
+                                 // No allocation
+                                 // Close the connection. Do this first since
+                                 // closing the stream will raise an exception

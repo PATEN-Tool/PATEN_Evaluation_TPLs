@@ -1,0 +1,79 @@
+diff --git a/java/org/apache/catalina/security/SecurityClassLoad.java b/java/org/apache/catalina/security/SecurityClassLoad.java
+index 37bac621b3e..bd2c4b53dba 100644
+--- a/java/org/apache/catalina/security/SecurityClassLoad.java
++++ b/java/org/apache/catalina/security/SecurityClassLoad.java
+@@ -39,6 +39,7 @@ public static void securityClassLoad(ClassLoader loader)
+         loadCoyotePackage(loader);
+         loadLoaderPackage(loader);
+         loadRealmPackage(loader);
++        loadServletsPackage(loader);
+         loadSessionPackage(loader);
+         loadUtilPackage(loader);
+         loadValvesPackage(loader);
+@@ -122,6 +123,18 @@ private static final void loadRealmPackage(ClassLoader loader)
+     }
+ 
+ 
++    private static final void loadServletsPackage(ClassLoader loader)
++            throws Exception {
++        final String basePackage = "org.apache.catalina.servlets.";
++        // Avoid a possible memory leak in the DefaultServlet when running with
++        // a security manager. The DefaultServlet needs to load an XML parser
++        // when running under a security manager. We want this to be loaded by
++        // the container rather than a web application to prevent a memory leak
++        // via web application class loader.
++        loader.loadClass(basePackage + "DefaultServlet");
++    }
++
++
+     private static final void loadSessionPackage(ClassLoader loader)
+         throws Exception {
+         final String basePackage = "org.apache.catalina.session.";
+diff --git a/java/org/apache/catalina/servlets/DefaultServlet.java b/java/org/apache/catalina/servlets/DefaultServlet.java
+index 574aa10c248..14feeea160b 100644
+--- a/java/org/apache/catalina/servlets/DefaultServlet.java
++++ b/java/org/apache/catalina/servlets/DefaultServlet.java
+@@ -129,8 +129,7 @@ public class DefaultServlet
+ 
+     private static final DocumentBuilderFactory factory;
+ 
+-    private static final SecureEntityResolver secureEntityResolver =
+-            new SecureEntityResolver();
++    private static final SecureEntityResolver secureEntityResolver;
+ 
+ 
+     // ----------------------------------------------------- Instance Variables
+@@ -238,9 +237,15 @@ public class DefaultServlet
+         urlEncoder.addSafeCharacter('*');
+         urlEncoder.addSafeCharacter('/');
+         
+-        factory = DocumentBuilderFactory.newInstance();
+-        factory.setNamespaceAware(true);
+-        factory.setValidating(false);
++        if (Globals.IS_SECURITY_ENABLED) {
++            factory = DocumentBuilderFactory.newInstance();
++            factory.setNamespaceAware(true);
++            factory.setValidating(false);
++            secureEntityResolver = new SecureEntityResolver();
++        } else {
++            factory = null;
++            secureEntityResolver = null;
++        }
+     }
+ 
+ 
+diff --git a/webapps/docs/changelog.xml b/webapps/docs/changelog.xml
+index 75bc16c241d..edc54e87abf 100644
+--- a/webapps/docs/changelog.xml
++++ b/webapps/docs/changelog.xml
+@@ -87,6 +87,10 @@
+         reverts all the operations performed when adding an MBean notification
+         listener. (markt)
+       </fix>
++      <fix>
++        Only create XML parsing objects if required and fix associated potential
++        memory leak in the default Servlet. (markt)
++      </fix>
+     </changelog>
+   </subsection>
+   <subsection name="Jasper">

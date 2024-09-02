@@ -1,0 +1,2059 @@
+diff --git a/server-spi-private/src/main/java/org/keycloak/models/utils/RepresentationToModel.java b/server-spi-private/src/main/java/org/keycloak/models/utils/RepresentationToModel.java
+index f50de409856e..117064e1b0db 100755
+--- a/server-spi-private/src/main/java/org/keycloak/models/utils/RepresentationToModel.java
++++ b/server-spi-private/src/main/java/org/keycloak/models/utils/RepresentationToModel.java
+@@ -29,7 +29,6 @@
+ import java.util.Map;
+ import java.util.Map.Entry;
+ import java.util.Set;
+-import java.util.function.Function;
+ import java.util.stream.Collectors;
+ 
+ import org.jboss.logging.Logger;
+@@ -136,7 +135,7 @@
+ import org.keycloak.storage.UserStorageProviderModel;
+ import org.keycloak.storage.federated.UserFederatedStorageProvider;
+ import org.keycloak.util.JsonSerialization;
+-import org.keycloak.validation.ClientValidationUtil;
++import org.keycloak.validation.ValidationUtil;
+ 
+ public class RepresentationToModel {
+ 
+@@ -1265,8 +1264,8 @@ private static Map<String, ClientModel> createClients(KeycloakSession session, R
+             ClientModel app = createClient(session, realm, resourceRep, false, mappedFlows);
+             appMap.put(app.getClientId(), app);
+ 
+-            ClientValidationUtil.validate(session, app, false, c -> {
+-                throw new RuntimeException("Invalid client " + app.getClientId() + ": " + c.getError());
++            ValidationUtil.validateClient(session, app, false, r -> {
++                throw new RuntimeException("Invalid client " + app.getClientId() + ": " + r.getAllErrorsAsString());
+             });
+         }
+         return appMap;
+diff --git a/server-spi-private/src/main/java/org/keycloak/validation/ClientValidationContext.java b/server-spi-private/src/main/java/org/keycloak/validation/ClientValidationContext.java
+index aba7f7a43199..d12d0cbb1858 100644
+--- a/server-spi-private/src/main/java/org/keycloak/validation/ClientValidationContext.java
++++ b/server-spi-private/src/main/java/org/keycloak/validation/ClientValidationContext.java
+@@ -1,5 +1,5 @@
+ /*
+- * Copyright 2019 Red Hat, Inc. and/or its affiliates
++ * Copyright 2020 Red Hat, Inc. and/or its affiliates
+  * and other contributors as indicated by the @author tags.
+  *
+  * Licensed under the Apache License, Version 2.0 (the "License");
+@@ -14,26 +14,31 @@
+  * See the License for the specific language governing permissions and
+  * limitations under the License.
+  */
++
+ package org.keycloak.validation;
+ 
+ import org.keycloak.models.ClientModel;
+ import org.keycloak.models.KeycloakSession;
++import org.keycloak.representations.oidc.OIDCClientRepresentation;
+ 
+-public interface ClientValidationContext {
+-
+-    enum Event {
+-        CREATE,
+-        UPDATE
++/**
++ * @author Vaclav Muzikar <vmuzikar@redhat.com>
++ */
++public class ClientValidationContext extends DefaultValidationContext<ClientModel> {
++    public ClientValidationContext(Event event, KeycloakSession session, ClientModel objectToValidate) {
++        super(event, session, objectToValidate);
+     }
+ 
+-    Event getEvent();
+-
+-    KeycloakSession getSession();
++    public static class OIDCContext extends ClientValidationContext {
++        private final OIDCClientRepresentation oidcClient;
+ 
+-    ClientModel getClient();
+-
+-    String getError();
+-
+-    ClientValidationContext invalid(String error);
++        public OIDCContext(Event event, KeycloakSession session, ClientModel objectToValidate, OIDCClientRepresentation oidcClient) {
++            super(event, session, objectToValidate);
++            this.oidcClient = oidcClient;
++        }
+ 
++        public OIDCClientRepresentation getOIDCClient() {
++            return oidcClient;
++        }
++    }
+ }
+diff --git a/server-spi-private/src/main/java/org/keycloak/validation/ClientValidationProvider.java b/server-spi-private/src/main/java/org/keycloak/validation/ClientValidationProvider.java
+index 347b44b17a2d..0f1b144488e0 100644
+--- a/server-spi-private/src/main/java/org/keycloak/validation/ClientValidationProvider.java
++++ b/server-spi-private/src/main/java/org/keycloak/validation/ClientValidationProvider.java
+@@ -16,11 +16,12 @@
+  */
+ package org.keycloak.validation;
+ 
+-import org.keycloak.provider.Provider;
++import org.keycloak.models.ClientModel;
+ 
+-public interface ClientValidationProvider extends Provider {
++public interface ClientValidationProvider extends Validator<ClientModel> {
+ 
+-    void validate(ClientValidationContext context);
++    // for a special case when performing OIDC client registration
++    ValidationResult validate(ClientValidationContext.OIDCContext validationContext);
+ 
+     @Override
+     default void close() {
+diff --git a/server-spi-private/src/main/java/org/keycloak/validation/ClientValidationUtil.java b/server-spi-private/src/main/java/org/keycloak/validation/ClientValidationUtil.java
+deleted file mode 100644
+index beac8722b2b1..000000000000
+--- a/server-spi-private/src/main/java/org/keycloak/validation/ClientValidationUtil.java
++++ /dev/null
+@@ -1,88 +0,0 @@
+-/*
+- * Copyright 2019 Red Hat, Inc. and/or its affiliates
+- * and other contributors as indicated by the @author tags.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- * http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package org.keycloak.validation;
+-
+-import org.keycloak.models.ClientModel;
+-import org.keycloak.models.KeycloakSession;
+-
+-import javax.ws.rs.BadRequestException;
+-
+-public class ClientValidationUtil {
+-
+-    public static void validate(KeycloakSession session, ClientModel client, boolean create, ErrorHandler errorHandler) throws BadRequestException {
+-        ClientValidationProvider provider = session.getProvider(ClientValidationProvider.class);
+-        if (provider != null) {
+-            DefaultClientValidationContext context = new DefaultClientValidationContext(create ? ClientValidationContext.Event.CREATE : ClientValidationContext.Event.UPDATE, session, client);
+-            provider.validate(context);
+-
+-            if (!context.isValid()) {
+-                errorHandler.onError(context);
+-            }
+-        }
+-    }
+-
+-    public interface ErrorHandler {
+-
+-        void onError(ClientValidationContext context);
+-
+-    }
+-
+-    private static class DefaultClientValidationContext implements ClientValidationContext {
+-
+-        private Event event;
+-        private KeycloakSession session;
+-        private ClientModel client;
+-
+-        private String error;
+-
+-        public DefaultClientValidationContext(Event event, KeycloakSession session,  ClientModel client) {
+-            this.event = event;
+-            this.session = session;
+-            this.client = client;
+-        }
+-
+-        public boolean isValid() {
+-            return error == null;
+-        }
+-
+-        public String getError() {
+-            return error;
+-        }
+-
+-        @Override
+-        public Event getEvent() {
+-            return event;
+-        }
+-
+-        @Override
+-        public KeycloakSession getSession() {
+-            return session;
+-        }
+-
+-        @Override
+-        public ClientModel getClient() {
+-            return client;
+-        }
+-
+-        @Override
+-        public ClientValidationContext invalid(String error) {
+-            this.error = error;
+-            return this;
+-        }
+-    }
+-
+-}
+diff --git a/server-spi-private/src/main/java/org/keycloak/validation/DefaultValidationContext.java b/server-spi-private/src/main/java/org/keycloak/validation/DefaultValidationContext.java
+new file mode 100644
+index 000000000000..27022158e991
+--- /dev/null
++++ b/server-spi-private/src/main/java/org/keycloak/validation/DefaultValidationContext.java
+@@ -0,0 +1,77 @@
++/*
++ * Copyright 2020 Red Hat, Inc. and/or its affiliates
++ * and other contributors as indicated by the @author tags.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.keycloak.validation;
++
++import org.keycloak.models.KeycloakSession;
++
++import java.util.HashSet;
++import java.util.Set;
++
++/**
++ * @author Vaclav Muzikar <vmuzikar@redhat.com>
++ */
++public abstract class DefaultValidationContext<T> implements ValidationContext<T> {
++
++    private final Event event;
++    private final KeycloakSession session;
++    private final T objectToValidate;
++    private final Set<ValidationError> errors;
++
++    public DefaultValidationContext(Event event, KeycloakSession session, T objectToValidate) {
++        this.event = event;
++        this.session = session;
++        this.objectToValidate = objectToValidate;
++        this.errors = new HashSet<>();
++    }
++
++    @Override
++    public Event getEvent() {
++        return event;
++    }
++
++    @Override
++    public KeycloakSession getSession() {
++        return session;
++    }
++
++    @Override
++    public T getObjectToValidate() {
++        return objectToValidate;
++    }
++
++    @Override
++    public ValidationContext<T> addError(String message) {
++        return addError(null, message, null);
++    }
++
++    @Override
++    public ValidationContext<T> addError(String fieldId, String message) {
++        return addError(fieldId, message, null);
++    }
++
++    @Override
++    public ValidationContext<T> addError(String fieldId, String message, String localizedMessageKey, Object... localizedMessageParams) {
++        errors.add(new ValidationError(fieldId, message, localizedMessageKey, localizedMessageParams));
++        return this;
++    }
++
++    @Override
++    public ValidationResult toResult() {
++        return new ValidationResult(new HashSet<>(errors));
++    }
++}
+diff --git a/server-spi-private/src/main/java/org/keycloak/validation/ValidationContext.java b/server-spi-private/src/main/java/org/keycloak/validation/ValidationContext.java
+new file mode 100644
+index 000000000000..6d1784bbf10a
+--- /dev/null
++++ b/server-spi-private/src/main/java/org/keycloak/validation/ValidationContext.java
+@@ -0,0 +1,39 @@
++/*
++ * Copyright 2019 Red Hat, Inc. and/or its affiliates
++ * and other contributors as indicated by the @author tags.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.keycloak.validation;
++
++import org.keycloak.models.KeycloakSession;
++
++public interface ValidationContext<T> {
++
++    enum Event {
++        CREATE,
++        UPDATE
++    }
++
++    Event getEvent();
++
++    KeycloakSession getSession();
++
++    T getObjectToValidate();
++
++    ValidationContext<T> addError(String message);
++    ValidationContext<T> addError(String fieldId, String message);
++    ValidationContext<T> addError(String fieldId, String message, String localizedMessageKey, Object... localizedMessageParams);
++
++    ValidationResult toResult();
++}
+diff --git a/server-spi-private/src/main/java/org/keycloak/validation/ValidationError.java b/server-spi-private/src/main/java/org/keycloak/validation/ValidationError.java
+new file mode 100644
+index 000000000000..4be55895ca67
+--- /dev/null
++++ b/server-spi-private/src/main/java/org/keycloak/validation/ValidationError.java
+@@ -0,0 +1,87 @@
++/*
++ * Copyright 2020 Red Hat, Inc. and/or its affiliates
++ * and other contributors as indicated by the @author tags.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.keycloak.validation;
++
++import java.text.MessageFormat;
++import java.util.Arrays;
++import java.util.Objects;
++import java.util.Properties;
++
++/**
++ * @author Vaclav Muzikar <vmuzikar@redhat.com>
++ */
++public class ValidationError {
++    private final String fieldId;
++    private final String message;
++    private final String localizedMessageKey;
++    private final Object[] localizedMessageParameters;
++
++    public ValidationError(String fieldId, String message, String localizedMessageKey, Object[] localizedMessageParameters) {
++        if (message == null) {
++            throw new IllegalArgumentException("Message must be set");
++        }
++
++        this.fieldId = fieldId;
++        this.message = message;
++        this.localizedMessageKey = localizedMessageKey;
++        this.localizedMessageParameters = localizedMessageParameters;
++    }
++
++    public String getFieldId() {
++        return fieldId;
++    }
++
++    public String getLocalizedMessageKey() {
++        return localizedMessageKey;
++    }
++
++    public Object[] getLocalizedMessageParams() {
++        return localizedMessageParameters;
++    }
++
++    public String getMessage() {
++        return message;
++    }
++
++    public String getLocalizedMessage(Properties messagesBundle) {
++        if (getLocalizedMessageKey() != null) {
++            return MessageFormat.format(messagesBundle.getProperty(getLocalizedMessageKey(), getMessage()), getLocalizedMessageParams());
++        }
++        else {
++            return getMessage();
++        }
++    }
++
++    @Override
++    public boolean equals(Object o) {
++        if (this == o) return true;
++        if (o == null || getClass() != o.getClass()) return false;
++        ValidationError error = (ValidationError) o;
++        return Objects.equals(fieldId, error.fieldId) &&
++                message.equals(error.message) &&
++                Objects.equals(localizedMessageKey, error.localizedMessageKey) &&
++                Arrays.equals(localizedMessageParameters, error.localizedMessageParameters);
++    }
++
++    @Override
++    public int hashCode() {
++        int result = Objects.hash(fieldId, message, localizedMessageKey);
++        result = 31 * result + Arrays.hashCode(localizedMessageParameters);
++        return result;
++    }
++}
+diff --git a/server-spi-private/src/main/java/org/keycloak/validation/ValidationResult.java b/server-spi-private/src/main/java/org/keycloak/validation/ValidationResult.java
+new file mode 100644
+index 000000000000..dfd1ed94224b
+--- /dev/null
++++ b/server-spi-private/src/main/java/org/keycloak/validation/ValidationResult.java
+@@ -0,0 +1,69 @@
++/*
++ * Copyright 2020 Red Hat, Inc. and/or its affiliates
++ * and other contributors as indicated by the @author tags.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.keycloak.validation;
++
++import java.util.Collections;
++import java.util.Properties;
++import java.util.Set;
++import java.util.function.Function;
++import java.util.stream.Collectors;
++
++/**
++ * @author Vaclav Muzikar <vmuzikar@redhat.com>
++ */
++public class ValidationResult {
++    private final boolean valid;
++    private final Set<ValidationError> errors;
++
++    public ValidationResult(Set<ValidationError> errors) {
++        this.valid = errors.size() == 0;
++        this.errors = Collections.unmodifiableSet(errors);
++    }
++
++    public boolean isValid() {
++        return valid;
++    }
++
++    public Set<ValidationError> getErrors() {
++        return errors;
++    }
++
++    public String getAllErrorsAsString() {
++        return getAllErrorsAsString(ValidationError::getMessage);
++    }
++
++    public String getAllLocalizedErrorsAsString(Properties messagesBundle) {
++        return getAllErrorsAsString(x -> x.getLocalizedMessage(messagesBundle));
++    }
++
++    protected String getAllErrorsAsString(Function<ValidationError, String> function) {
++        return errors.stream().map(function).collect(Collectors.joining("; "));
++    }
++
++    public boolean fieldHasError(String fieldId) {
++        if (fieldId == null) {
++            return false;
++        }
++        for (ValidationError error : errors) {
++            if (fieldId.equals(error.getFieldId())) {
++                return true;
++            }
++        }
++        return false;
++    }
++}
+diff --git a/server-spi-private/src/main/java/org/keycloak/validation/ValidationUtil.java b/server-spi-private/src/main/java/org/keycloak/validation/ValidationUtil.java
+new file mode 100644
+index 000000000000..ee66ecaca89d
+--- /dev/null
++++ b/server-spi-private/src/main/java/org/keycloak/validation/ValidationUtil.java
+@@ -0,0 +1,56 @@
++/*
++ * Copyright 2019 Red Hat, Inc. and/or its affiliates
++ * and other contributors as indicated by the @author tags.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.keycloak.validation;
++
++import org.keycloak.models.ClientModel;
++import org.keycloak.models.KeycloakSession;
++import org.keycloak.representations.oidc.OIDCClientRepresentation;
++
++import javax.ws.rs.BadRequestException;
++
++public class ValidationUtil {
++
++    public static void validateClient(KeycloakSession session, ClientModel client, boolean create, ErrorHandler errorHandler) throws BadRequestException {
++        validateClient(session, client, null, create, errorHandler);
++    }
++
++    public static void validateClient(KeycloakSession session, ClientModel client, OIDCClientRepresentation oidcClient, boolean create, ErrorHandler errorHandler) throws BadRequestException {
++        ClientValidationProvider provider = session.getProvider(ClientValidationProvider.class);
++        if (provider != null) {
++            ValidationContext.Event event = create ? ValidationContext.Event.CREATE : ValidationContext.Event.UPDATE;
++            ValidationResult result;
++
++            if (oidcClient != null) {
++                result = provider.validate(new ClientValidationContext.OIDCContext(event, session, client, oidcClient));
++            }
++            else {
++                result = provider.validate(new ClientValidationContext(event, session, client));
++            }
++
++            if (!result.isValid()) {
++                errorHandler.onError(result);
++            }
++        }
++    }
++
++    public interface ErrorHandler {
++
++        void onError(ValidationResult context);
++
++    }
++
++}
+diff --git a/server-spi-private/src/main/java/org/keycloak/validation/Validator.java b/server-spi-private/src/main/java/org/keycloak/validation/Validator.java
+new file mode 100644
+index 000000000000..46abf08a77ad
+--- /dev/null
++++ b/server-spi-private/src/main/java/org/keycloak/validation/Validator.java
+@@ -0,0 +1,27 @@
++/*
++ * Copyright 2020 Red Hat, Inc. and/or its affiliates
++ * and other contributors as indicated by the @author tags.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ * http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.keycloak.validation;
++
++import org.keycloak.provider.Provider;
++
++/**
++ * @author Vaclav Muzikar <vmuzikar@redhat.com>
++ */
++public interface Validator<T> extends Provider {
++    ValidationResult validate(ValidationContext<T> validationContext);
++}
+diff --git a/services/src/main/java/org/keycloak/protocol/saml/clientregistration/EntityDescriptorClientRegistrationProvider.java b/services/src/main/java/org/keycloak/protocol/saml/clientregistration/EntityDescriptorClientRegistrationProvider.java
+index 5a284468fcc5..b49d0a6e71dc 100755
+--- a/services/src/main/java/org/keycloak/protocol/saml/clientregistration/EntityDescriptorClientRegistrationProvider.java
++++ b/services/src/main/java/org/keycloak/protocol/saml/clientregistration/EntityDescriptorClientRegistrationProvider.java
+@@ -46,6 +46,7 @@ public Response createSaml(String descriptor) {
+         ClientRepresentation client = session.getProvider(ClientDescriptionConverter.class, EntityDescriptorDescriptionConverter.ID).convertToInternal(descriptor);
+         EntityDescriptorClientRegistrationContext context = new EntityDescriptorClientRegistrationContext(session, client, this);
+         client = create(context);
++        validateClient(client, true);
+         URI uri = session.getContext().getUri().getAbsolutePathBuilder().path(client.getClientId()).build();
+         return Response.created(uri).entity(client).build();
+     }
+diff --git a/services/src/main/java/org/keycloak/services/clientregistration/AbstractClientRegistrationContext.java b/services/src/main/java/org/keycloak/services/clientregistration/AbstractClientRegistrationContext.java
+index f6bea930fc9b..0232c41a28c1 100644
+--- a/services/src/main/java/org/keycloak/services/clientregistration/AbstractClientRegistrationContext.java
++++ b/services/src/main/java/org/keycloak/services/clientregistration/AbstractClientRegistrationContext.java
+@@ -19,8 +19,6 @@
+ 
+ import org.keycloak.models.KeycloakSession;
+ import org.keycloak.representations.idm.ClientRepresentation;
+-import org.keycloak.services.validation.ClientValidator;
+-import org.keycloak.services.validation.ValidationMessages;
+ 
+ /**
+  * @author <a href="mailto:mposolda@redhat.com">Marek Posolda</a>
+@@ -52,8 +50,4 @@ public ClientRegistrationProvider getProvider() {
+         return provider;
+     }
+ 
+-    @Override
+-    public boolean validateClient(ValidationMessages validationMessages) {
+-        return ClientValidator.validate(client, validationMessages);
+-    }
+ }
+diff --git a/services/src/main/java/org/keycloak/services/clientregistration/AbstractClientRegistrationProvider.java b/services/src/main/java/org/keycloak/services/clientregistration/AbstractClientRegistrationProvider.java
+index 927a470064cf..a473b0aa2521 100755
+--- a/services/src/main/java/org/keycloak/services/clientregistration/AbstractClientRegistrationProvider.java
++++ b/services/src/main/java/org/keycloak/services/clientregistration/AbstractClientRegistrationProvider.java
+@@ -19,18 +19,22 @@
+ 
+ import org.keycloak.events.EventBuilder;
+ import org.keycloak.events.EventType;
+-import org.keycloak.models.*;
++import org.keycloak.models.ClientInitialAccessModel;
++import org.keycloak.models.ClientModel;
++import org.keycloak.models.KeycloakSession;
++import org.keycloak.models.ModelDuplicateException;
++import org.keycloak.models.RealmModel;
+ import org.keycloak.models.utils.ModelToRepresentation;
+ import org.keycloak.models.utils.RepresentationToModel;
+ import org.keycloak.representations.idm.ClientRepresentation;
++import org.keycloak.representations.oidc.OIDCClientRepresentation;
+ import org.keycloak.services.ErrorResponseException;
+ import org.keycloak.services.ForbiddenException;
+ import org.keycloak.services.clientregistration.policy.ClientRegistrationPolicyManager;
+ import org.keycloak.services.clientregistration.policy.RegistrationAuth;
+ import org.keycloak.services.managers.ClientManager;
+ import org.keycloak.services.managers.RealmManager;
+-import org.keycloak.services.validation.ValidationMessages;
+-import org.keycloak.validation.ClientValidationUtil;
++import org.keycloak.validation.ValidationUtil;
+ 
+ import javax.ws.rs.core.Response;
+ 
+@@ -54,16 +58,6 @@ public ClientRepresentation create(ClientRegistrationContext context) {
+ 
+         RegistrationAuth registrationAuth = auth.requireCreate(context);
+ 
+-        ValidationMessages validationMessages = new ValidationMessages();
+-        if (!context.validateClient(validationMessages)) {
+-            String errorCode = validationMessages.fieldHasError("redirectUris") ? ErrorCodes.INVALID_REDIRECT_URI : ErrorCodes.INVALID_CLIENT_METADATA;
+-            throw new ErrorResponseException(
+-                    errorCode,
+-                    validationMessages.getStringMessages(),
+-                    Response.Status.BAD_REQUEST
+-            );
+-        }
+-
+         try {
+             RealmModel realm = session.getContext().getRealm();
+             ClientModel clientModel = ClientManager.createClient(session, realm, client, true);
+@@ -82,11 +76,6 @@ public ClientRepresentation create(ClientRegistrationContext context) {
+ 
+             client.setSecret(clientModel.getSecret());
+ 
+-            ClientValidationUtil.validate(session, clientModel, true, c -> {
+-                session.getTransactionManager().setRollbackOnly();
+-                throw  new ErrorResponseException(ErrorCodes.INVALID_CLIENT_METADATA, c.getError(), Response.Status.BAD_REQUEST);
+-            });
+-
+             String registrationAccessToken = ClientRegistrationTokenUtils.updateRegistrationAccessToken(session, clientModel, registrationAuth);
+             client.setRegistrationAccessToken(registrationAccessToken);
+ 
+@@ -133,24 +122,9 @@ public ClientRepresentation update(String clientId, ClientRegistrationContext co
+             throw new ErrorResponseException(ErrorCodes.INVALID_CLIENT_METADATA, "Client Identifier modified", Response.Status.BAD_REQUEST);
+         }
+ 
+-        ValidationMessages validationMessages = new ValidationMessages();
+-        if (!context.validateClient(validationMessages)) {
+-            String errorCode = validationMessages.fieldHasError("redirectUris") ? ErrorCodes.INVALID_REDIRECT_URI : ErrorCodes.INVALID_CLIENT_METADATA;
+-            throw new ErrorResponseException(
+-                    errorCode,
+-                    validationMessages.getStringMessages(),
+-                    Response.Status.BAD_REQUEST
+-            );
+-        }
+-
+         RepresentationToModel.updateClient(rep, client);
+         RepresentationToModel.updateClientProtocolMappers(rep, client);
+ 
+-        ClientValidationUtil.validate(session, client, false, c -> {
+-            session.getTransactionManager().setRollbackOnly();
+-            throw  new ErrorResponseException(ErrorCodes.INVALID_CLIENT_METADATA, c.getError(), Response.Status.BAD_REQUEST);
+-        });
+-
+         rep = ModelToRepresentation.toRepresentation(client, session);
+ 
+         if (auth.isRegistrationAccessToken()) {
+@@ -178,6 +152,18 @@ public void delete(String clientId) {
+         }
+     }
+ 
++    public void validateClient(ClientModel clientModel, OIDCClientRepresentation oidcClient, boolean create) {
++        ValidationUtil.validateClient(session, clientModel, oidcClient, create, r -> {
++            session.getTransactionManager().setRollbackOnly();
++            String errorCode = r.fieldHasError("redirectUris") ? ErrorCodes.INVALID_REDIRECT_URI : ErrorCodes.INVALID_CLIENT_METADATA;
++            throw new ErrorResponseException(errorCode, r.getAllErrorsAsString(), Response.Status.BAD_REQUEST);
++        });
++    }
++
++    public void validateClient(ClientRepresentation clientRep, boolean create) {
++        validateClient(session.getContext().getRealm().getClientByClientId(clientRep.getClientId()), null, create);
++    }
++
+     @Override
+     public void setAuth(ClientRegistrationAuth auth) {
+         this.auth = auth;
+diff --git a/services/src/main/java/org/keycloak/services/clientregistration/ClientRegistrationContext.java b/services/src/main/java/org/keycloak/services/clientregistration/ClientRegistrationContext.java
+index 0ccdb7b80cb0..d67079df93ad 100644
+--- a/services/src/main/java/org/keycloak/services/clientregistration/ClientRegistrationContext.java
++++ b/services/src/main/java/org/keycloak/services/clientregistration/ClientRegistrationContext.java
+@@ -19,7 +19,6 @@
+ 
+ import org.keycloak.models.KeycloakSession;
+ import org.keycloak.representations.idm.ClientRepresentation;
+-import org.keycloak.services.validation.ValidationMessages;
+ 
+ /**
+  * @author <a href="mailto:mposolda@redhat.com">Marek Posolda</a>
+@@ -32,6 +31,4 @@ public interface ClientRegistrationContext {
+ 
+     ClientRegistrationProvider getProvider();
+ 
+-    boolean validateClient(ValidationMessages validationMessages);
+-
+ }
+diff --git a/services/src/main/java/org/keycloak/services/clientregistration/DefaultClientRegistrationContext.java b/services/src/main/java/org/keycloak/services/clientregistration/DefaultClientRegistrationContext.java
+index 08aeaef702c0..685ed864167e 100644
+--- a/services/src/main/java/org/keycloak/services/clientregistration/DefaultClientRegistrationContext.java
++++ b/services/src/main/java/org/keycloak/services/clientregistration/DefaultClientRegistrationContext.java
+@@ -19,8 +19,6 @@
+ 
+ import org.keycloak.models.KeycloakSession;
+ import org.keycloak.representations.idm.ClientRepresentation;
+-import org.keycloak.services.validation.PairwiseClientValidator;
+-import org.keycloak.services.validation.ValidationMessages;
+ 
+ /**
+  * @author <a href="mailto:mposolda@redhat.com">Marek Posolda</a>
+@@ -31,8 +29,4 @@ public DefaultClientRegistrationContext(KeycloakSession session, ClientRepresent
+         super(session, client, provider);
+     }
+ 
+-    @Override
+-    public boolean validateClient(ValidationMessages validationMessages) {
+-        return super.validateClient(validationMessages) && PairwiseClientValidator.validate(session, client, validationMessages);
+-    }
+ }
+diff --git a/services/src/main/java/org/keycloak/services/clientregistration/DefaultClientRegistrationProvider.java b/services/src/main/java/org/keycloak/services/clientregistration/DefaultClientRegistrationProvider.java
+index de2a61516868..a0b484647ab7 100755
+--- a/services/src/main/java/org/keycloak/services/clientregistration/DefaultClientRegistrationProvider.java
++++ b/services/src/main/java/org/keycloak/services/clientregistration/DefaultClientRegistrationProvider.java
+@@ -48,6 +48,7 @@ public DefaultClientRegistrationProvider(KeycloakSession session) {
+     public Response createDefault(ClientRepresentation client) {
+         DefaultClientRegistrationContext context = new DefaultClientRegistrationContext(session, client, this);
+         client = create(context);
++        validateClient(client, true);
+         URI uri = session.getContext().getUri().getAbsolutePathBuilder().path(client.getClientId()).build();
+         return Response.created(uri).entity(client).build();
+     }
+@@ -68,6 +69,7 @@ public Response getDefault(@PathParam("clientId") String clientId) {
+     public Response updateDefault(@PathParam("clientId") String clientId, ClientRepresentation client) {
+         DefaultClientRegistrationContext context = new DefaultClientRegistrationContext(session, client, this);
+         client = update(clientId, context);
++        validateClient(client, false);
+         return Response.ok(client).build();
+     }
+ 
+diff --git a/services/src/main/java/org/keycloak/services/clientregistration/oidc/OIDCClientRegistrationContext.java b/services/src/main/java/org/keycloak/services/clientregistration/oidc/OIDCClientRegistrationContext.java
+index 9b9c5b414e0d..036de311662e 100644
+--- a/services/src/main/java/org/keycloak/services/clientregistration/oidc/OIDCClientRegistrationContext.java
++++ b/services/src/main/java/org/keycloak/services/clientregistration/oidc/OIDCClientRegistrationContext.java
+@@ -17,18 +17,11 @@
+ 
+ package org.keycloak.services.clientregistration.oidc;
+ 
+-import java.util.HashSet;
+-import java.util.Set;
+-
+ import org.keycloak.models.KeycloakSession;
+-import org.keycloak.protocol.oidc.utils.SubjectType;
+ import org.keycloak.representations.idm.ClientRepresentation;
+ import org.keycloak.representations.oidc.OIDCClientRepresentation;
+ import org.keycloak.services.clientregistration.AbstractClientRegistrationContext;
+ import org.keycloak.services.clientregistration.ClientRegistrationProvider;
+-import org.keycloak.services.clientregistration.DefaultClientRegistrationContext;
+-import org.keycloak.services.validation.PairwiseClientValidator;
+-import org.keycloak.services.validation.ValidationMessages;
+ 
+ /**
+  * @author <a href="mailto:mposolda@redhat.com">Marek Posolda</a>
+@@ -42,21 +35,4 @@ public OIDCClientRegistrationContext(KeycloakSession session, ClientRepresentati
+         this.oidcRep = oidcRep;
+     }
+ 
+-    @Override
+-    public boolean validateClient(ValidationMessages validationMessages) {
+-        boolean valid = super.validateClient(validationMessages);
+-
+-        String rootUrl = client.getRootUrl();
+-        Set<String> redirectUris = new HashSet<>();
+-        if (client.getRedirectUris() != null) redirectUris.addAll(client.getRedirectUris());
+-
+-        SubjectType subjectType = SubjectType.parse(oidcRep.getSubjectType());
+-        String sectorIdentifierUri = oidcRep.getSectorIdentifierUri();
+-
+-        // If sector_identifier_uri is in oidc config, then always validate it
+-        if (SubjectType.PAIRWISE == subjectType || (sectorIdentifierUri != null && !sectorIdentifierUri.isEmpty())) {
+-            valid = valid && PairwiseClientValidator.validate(session, rootUrl, redirectUris, oidcRep.getSectorIdentifierUri(), validationMessages);
+-        }
+-        return valid;
+-    }
+ }
+diff --git a/services/src/main/java/org/keycloak/services/clientregistration/oidc/OIDCClientRegistrationProvider.java b/services/src/main/java/org/keycloak/services/clientregistration/oidc/OIDCClientRegistrationProvider.java
+index d2a03a16a4aa..6601aa2ae417 100755
+--- a/services/src/main/java/org/keycloak/services/clientregistration/oidc/OIDCClientRegistrationProvider.java
++++ b/services/src/main/java/org/keycloak/services/clientregistration/oidc/OIDCClientRegistrationProvider.java
+@@ -86,6 +86,8 @@ public Response createOIDC(OIDCClientRepresentation clientOIDC) {
+             updatePairwiseSubMappers(clientModel, SubjectType.parse(clientOIDC.getSubjectType()), clientOIDC.getSectorIdentifierUri());
+             updateClientRepWithProtocolMappers(clientModel, client);
+ 
++            validateClient(clientModel, clientOIDC, true);
++
+             URI uri = session.getContext().getUri().getAbsolutePathBuilder().path(client.getClientId()).build();
+             clientOIDC = DescriptionConverter.toExternalResponse(session, client, uri);
+             clientOIDC.setClientIdIssuedAt(Time.currentTime());
+@@ -122,6 +124,8 @@ public Response updateOIDC(@PathParam("clientId") String clientId, OIDCClientRep
+             updatePairwiseSubMappers(clientModel, SubjectType.parse(clientOIDC.getSubjectType()), clientOIDC.getSectorIdentifierUri());
+             updateClientRepWithProtocolMappers(clientModel, client);
+ 
++            validateClient(clientModel, clientOIDC, false);
++
+             URI uri = session.getContext().getUri().getAbsolutePathBuilder().path(client.getClientId()).build();
+             clientOIDC = DescriptionConverter.toExternalResponse(session, client, uri);
+             return Response.ok(clientOIDC).build();
+diff --git a/services/src/main/java/org/keycloak/services/resources/admin/ClientResource.java b/services/src/main/java/org/keycloak/services/resources/admin/ClientResource.java
+index f59611e5019b..567ce955af9c 100755
+--- a/services/src/main/java/org/keycloak/services/resources/admin/ClientResource.java
++++ b/services/src/main/java/org/keycloak/services/resources/admin/ClientResource.java
+@@ -22,7 +22,6 @@
+ import org.jboss.resteasy.spi.ResteasyProviderFactory;
+ import org.keycloak.authorization.admin.AuthorizationService;
+ import org.keycloak.common.ClientConnection;
+-import org.keycloak.common.Profile;
+ import org.keycloak.common.util.Time;
+ import org.keycloak.events.Errors;
+ import org.keycloak.events.admin.OperationType;
+@@ -63,11 +62,8 @@
+ import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
+ import org.keycloak.services.resources.admin.permissions.AdminPermissionManagement;
+ import org.keycloak.services.resources.admin.permissions.AdminPermissions;
+-import org.keycloak.services.validation.ClientValidator;
+-import org.keycloak.services.validation.PairwiseClientValidator;
+-import org.keycloak.services.validation.ValidationMessages;
+-import org.keycloak.utils.ProfileHelper;
+-import org.keycloak.validation.ClientValidationUtil;
++import org.keycloak.utils.ReservedCharValidator;
++import org.keycloak.validation.ValidationUtil;
+ 
+ import javax.ws.rs.Consumes;
+ import javax.ws.rs.DELETE;
+@@ -87,10 +83,8 @@
+ import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Map;
+-import java.util.Properties;
+ 
+ import static java.lang.Boolean.TRUE;
+-import org.keycloak.utils.ReservedCharValidator;
+ 
+ 
+ /**
+@@ -138,16 +132,6 @@ public ProtocolMappersResource getProtocolMappers() {
+     public Response update(final ClientRepresentation rep) {
+         auth.clients().requireConfigure(client);
+ 
+-        ValidationMessages validationMessages = new ValidationMessages();
+-        if (!ClientValidator.validate(rep, validationMessages) || !PairwiseClientValidator.validate(session, rep, validationMessages)) {
+-            Properties messages = AdminRoot.getMessages(session, realm, auth.adminAuth().getToken().getLocale());
+-            throw new ErrorResponseException(
+-                    validationMessages.getStringMessages(),
+-                    validationMessages.getStringMessages(messages),
+-                    Response.Status.BAD_REQUEST
+-            );
+-        }
+-
+         try {
+             session.clientPolicy().triggerOnEvent(new AdminClientUpdateContext(rep, auth.adminAuth(), client));
+         } catch (ClientPolicyException cpe) {
+@@ -157,9 +141,12 @@ public Response update(final ClientRepresentation rep) {
+         try {
+             updateClientFromRep(rep, client, session);
+ 
+-            ClientValidationUtil.validate(session, client, false, c -> {
++            ValidationUtil.validateClient(session, client, false, r -> {
+                 session.getTransactionManager().setRollbackOnly();
+-                throw new ErrorResponseException(Errors.INVALID_INPUT ,c.getError(), Response.Status.BAD_REQUEST);
++                throw new ErrorResponseException(
++                        Errors.INVALID_INPUT,
++                        r.getAllLocalizedErrorsAsString(AdminRoot.getMessages(session, realm, auth.adminAuth().getToken().getLocale())),
++                        Response.Status.BAD_REQUEST);
+             });
+ 
+             adminEvent.operation(OperationType.UPDATE).resourcePath(session.getContext().getUri()).representation(rep).success();
+diff --git a/services/src/main/java/org/keycloak/services/resources/admin/ClientsResource.java b/services/src/main/java/org/keycloak/services/resources/admin/ClientsResource.java
+index f120b412d86e..766b2c994da5 100755
+--- a/services/src/main/java/org/keycloak/services/resources/admin/ClientsResource.java
++++ b/services/src/main/java/org/keycloak/services/resources/admin/ClientsResource.java
+@@ -40,10 +40,7 @@
+ import org.keycloak.services.managers.ClientManager;
+ import org.keycloak.services.managers.RealmManager;
+ import org.keycloak.services.resources.admin.permissions.AdminPermissionEvaluator;
+-import org.keycloak.services.validation.ClientValidator;
+-import org.keycloak.services.validation.PairwiseClientValidator;
+-import org.keycloak.services.validation.ValidationMessages;
+-import org.keycloak.validation.ClientValidationUtil;
++import org.keycloak.validation.ValidationUtil;
+ 
+ import javax.ws.rs.Consumes;
+ import javax.ws.rs.DefaultValue;
+@@ -60,7 +57,6 @@
+ import java.util.ArrayList;
+ import java.util.Collections;
+ import java.util.List;
+-import java.util.Properties;
+ 
+ import static java.lang.Boolean.TRUE;
+ 
+@@ -179,16 +175,6 @@ private AuthorizationService getAuthorizationService(ClientModel clientModel) {
+     public Response createClient(final ClientRepresentation rep) {
+         auth.clients().requireManage();
+ 
+-        ValidationMessages validationMessages = new ValidationMessages();
+-        if (!ClientValidator.validate(rep, validationMessages) || !PairwiseClientValidator.validate(session, rep, validationMessages)) {
+-            Properties messages = AdminRoot.getMessages(session, realm, auth.adminAuth().getToken().getLocale());
+-            throw new ErrorResponseException(
+-                    validationMessages.getStringMessages(),
+-                    validationMessages.getStringMessages(messages),
+-                    Response.Status.BAD_REQUEST
+-            );
+-        }
+-
+         try {
+             session.clientPolicy().triggerOnEvent(new AdminClientRegisterContext(rep, auth.adminAuth()));
+         } catch (ClientPolicyException cpe) {
+@@ -220,9 +206,12 @@ public Response createClient(final ClientRepresentation rep) {
+                 }
+             }
+ 
+-            ClientValidationUtil.validate(session, clientModel, true, c -> {
++            ValidationUtil.validateClient(session, clientModel, true, r -> {
+                 session.getTransactionManager().setRollbackOnly();
+-                throw new ErrorResponseException(Errors.INVALID_INPUT, c.getError(), Response.Status.BAD_REQUEST);
++                throw new ErrorResponseException(
++                        Errors.INVALID_INPUT,
++                        r.getAllLocalizedErrorsAsString(AdminRoot.getMessages(session, realm, auth.adminAuth().getToken().getLocale())),
++                        Response.Status.BAD_REQUEST);
+             });
+ 
+             return Response.created(session.getContext().getUri().getAbsolutePathBuilder().path(clientModel.getId()).build()).build();
+diff --git a/services/src/main/java/org/keycloak/services/validation/ClientValidator.java b/services/src/main/java/org/keycloak/services/validation/ClientValidator.java
+deleted file mode 100644
+index 22290c5a12db..000000000000
+--- a/services/src/main/java/org/keycloak/services/validation/ClientValidator.java
++++ /dev/null
+@@ -1,54 +0,0 @@
+-/*
+- *
+- *  * Copyright 2016 Red Hat, Inc. and/or its affiliates
+- *  * and other contributors as indicated by the @author tags.
+- *  *
+- *  * Licensed under the Apache License, Version 2.0 (the "License");
+- *  * you may not use this file except in compliance with the License.
+- *  * You may obtain a copy of the License at
+- *  *
+- *  * http://www.apache.org/licenses/LICENSE-2.0
+- *  *
+- *  * Unless required by applicable law or agreed to in writing, software
+- *  * distributed under the License is distributed on an "AS IS" BASIS,
+- *  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  * See the License for the specific language governing permissions and
+- *  * limitations under the License.
+- *
+- */
+-
+-package org.keycloak.services.validation;
+-
+-import org.keycloak.representations.idm.ClientRepresentation;
+-
+-/**
+- * @author Vaclav Muzikar <vmuzikar@redhat.com>
+- */
+-public class ClientValidator {
+-    /**
+-     * Checks if the Client's Redirect URIs doesn't contain any URI fragments (like http://example.org/auth#fragment)
+-     *
+-     * @see <a href="https://issues.jboss.org/browse/KEYCLOAK-3421">KEYCLOAK-3421</a>
+-     * @param client
+-     * @param messages
+-     * @return true if Redirect URIs doesn't contain any URI with fragments
+-     */
+-    public static boolean validate(ClientRepresentation client, ValidationMessages messages) {
+-        boolean isValid = true;
+-
+-        if (client.getRedirectUris() != null) {
+-            long urisWithFragmentCount = client.getRedirectUris().stream().filter(p -> p.contains("#")).count();
+-            if (urisWithFragmentCount > 0) {
+-                messages.add("redirectUris", "Redirect URIs must not contain an URI fragment", "clientRedirectURIsFragmentError");
+-                isValid = false;
+-            }
+-        }
+-
+-        if (client.getRootUrl() != null && client.getRootUrl().contains("#")) {
+-            messages.add("rootUrl", "Root URL must not contain an URL fragment", "clientRootURLFragmentError");
+-            isValid = false;
+-        }
+-
+-        return isValid;
+-    }
+-}
+diff --git a/services/src/main/java/org/keycloak/services/validation/PairwiseClientValidator.java b/services/src/main/java/org/keycloak/services/validation/PairwiseClientValidator.java
+deleted file mode 100644
+index f502fae661d3..000000000000
+--- a/services/src/main/java/org/keycloak/services/validation/PairwiseClientValidator.java
++++ /dev/null
+@@ -1,47 +0,0 @@
+-package org.keycloak.services.validation;
+-
+-import org.keycloak.models.KeycloakSession;
+-import org.keycloak.protocol.ProtocolMapperConfigException;
+-import org.keycloak.protocol.oidc.mappers.PairwiseSubMapperHelper;
+-import org.keycloak.protocol.oidc.utils.PairwiseSubMapperUtils;
+-import org.keycloak.protocol.oidc.utils.PairwiseSubMapperValidator;
+-import org.keycloak.representations.idm.ClientRepresentation;
+-import org.keycloak.representations.idm.ProtocolMapperRepresentation;
+-
+-import java.util.HashSet;
+-import java.util.List;
+-import java.util.Set;
+-
+-
+-/**
+- * @author <a href="mailto:martin.hardselius@gmail.com">Martin Hardselius</a>
+- */
+-public class PairwiseClientValidator {
+-
+-    public static boolean validate(KeycloakSession session, ClientRepresentation client, ValidationMessages messages) {
+-        String rootUrl = client.getRootUrl();
+-        Set<String> redirectUris = new HashSet<>();
+-        boolean valid = true;
+-
+-        List<ProtocolMapperRepresentation> foundPairwiseMappers = PairwiseSubMapperUtils.getPairwiseSubMappers(client);
+-
+-        for (ProtocolMapperRepresentation foundPairwise : foundPairwiseMappers) {
+-            String sectorIdentifierUri = PairwiseSubMapperHelper.getSectorIdentifierUri(foundPairwise);
+-            if (client.getRedirectUris() != null) redirectUris.addAll(client.getRedirectUris());
+-            valid = valid && validate(session, rootUrl, redirectUris, sectorIdentifierUri, messages);
+-        }
+-
+-        return true;
+-    }
+-
+-    public static boolean validate(KeycloakSession session, String rootUrl, Set<String> redirectUris, String sectorIdentifierUri, ValidationMessages messages) {
+-        try {
+-            PairwiseSubMapperValidator.validate(session, rootUrl, redirectUris, sectorIdentifierUri);
+-        } catch (ProtocolMapperConfigException e) {
+-            messages.add(e.getMessage(), e.getMessageKey());
+-            return false;
+-        }
+-        return true;
+-    }
+-
+-}
+diff --git a/services/src/main/java/org/keycloak/services/validation/ValidationMessage.java b/services/src/main/java/org/keycloak/services/validation/ValidationMessage.java
+deleted file mode 100644
+index 7e4dac12a5b7..000000000000
+--- a/services/src/main/java/org/keycloak/services/validation/ValidationMessage.java
++++ /dev/null
+@@ -1,100 +0,0 @@
+-/*
+- *
+- *  * Copyright 2016 Red Hat, Inc. and/or its affiliates
+- *  * and other contributors as indicated by the @author tags.
+- *  *
+- *  * Licensed under the Apache License, Version 2.0 (the "License");
+- *  * you may not use this file except in compliance with the License.
+- *  * You may obtain a copy of the License at
+- *  *
+- *  * http://www.apache.org/licenses/LICENSE-2.0
+- *  *
+- *  * Unless required by applicable law or agreed to in writing, software
+- *  * distributed under the License is distributed on an "AS IS" BASIS,
+- *  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  * See the License for the specific language governing permissions and
+- *  * limitations under the License.
+- *
+- */
+-
+-package org.keycloak.services.validation;
+-
+-import java.text.MessageFormat;
+-import java.util.Properties;
+-
+-/**
+- * @author Vaclav Muzikar <vmuzikar@redhat.com>
+- */
+-public class ValidationMessage {
+-    private String fieldId;
+-    private String message;
+-    private String localizedMessageKey;
+-    private Object[] localizedMessageParameters;
+-
+-    public ValidationMessage(String message) {
+-        this.message = message;
+-    }
+-
+-    public ValidationMessage(String message, String localizedMessageKey, Object... localizedMessageParameters) {
+-        this.message = message;
+-        this.localizedMessageKey = localizedMessageKey;
+-        this.localizedMessageParameters = localizedMessageParameters;
+-    }
+-
+-    public String getFieldId() {
+-        return fieldId;
+-    }
+-
+-    public void setFieldId(String fieldId) {
+-        this.fieldId = fieldId;
+-    }
+-
+-    public String getLocalizedMessageKey() {
+-        return localizedMessageKey;
+-    }
+-
+-    public void setLocalizedMessageKey(String localizedMessageKey) {
+-        this.localizedMessageKey = localizedMessageKey;
+-    }
+-
+-    public Object[] getLocalizedMessageParameters() {
+-        return localizedMessageParameters;
+-    }
+-
+-    public void setLocalizedMessageParameters(Object[] localizedMessageParameters) {
+-        this.localizedMessageParameters = localizedMessageParameters;
+-    }
+-
+-    public String getMessage() {
+-        return message;
+-    }
+-
+-    public String getMessage(Properties localizedMessages) {
+-        if (getLocalizedMessageKey() != null) {
+-            return MessageFormat.format(localizedMessages.getProperty(getLocalizedMessageKey(), getMessage()), getLocalizedMessageParameters());
+-        }
+-        else {
+-            return getMessage();
+-        }
+-    }
+-
+-    @Override
+-    public boolean equals(Object o) {
+-        if (this == o) return true;
+-        if (o == null || getClass() != o.getClass()) return false;
+-
+-        ValidationMessage message1 = (ValidationMessage) o;
+-
+-        if (getFieldId() != null ? !getFieldId().equals(message1.getFieldId()) : message1.getFieldId() != null)
+-            return false;
+-        return getMessage() != null ? getMessage().equals(message1.getMessage()) : message1.getMessage() == null;
+-
+-    }
+-
+-    @Override
+-    public int hashCode() {
+-        int result = getFieldId() != null ? getFieldId().hashCode() : 0;
+-        result = 31 * result + (getMessage() != null ? getMessage().hashCode() : 0);
+-        return result;
+-    }
+-}
+diff --git a/services/src/main/java/org/keycloak/services/validation/ValidationMessages.java b/services/src/main/java/org/keycloak/services/validation/ValidationMessages.java
+deleted file mode 100644
+index 82db3742c2ef..000000000000
+--- a/services/src/main/java/org/keycloak/services/validation/ValidationMessages.java
++++ /dev/null
+@@ -1,89 +0,0 @@
+-/*
+- *
+- *  * Copyright 2016 Red Hat, Inc. and/or its affiliates
+- *  * and other contributors as indicated by the @author tags.
+- *  *
+- *  * Licensed under the Apache License, Version 2.0 (the "License");
+- *  * you may not use this file except in compliance with the License.
+- *  * You may obtain a copy of the License at
+- *  *
+- *  * http://www.apache.org/licenses/LICENSE-2.0
+- *  *
+- *  * Unless required by applicable law or agreed to in writing, software
+- *  * distributed under the License is distributed on an "AS IS" BASIS,
+- *  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- *  * See the License for the specific language governing permissions and
+- *  * limitations under the License.
+- *
+- */
+-
+-package org.keycloak.services.validation;
+-
+-import java.util.Collections;
+-import java.util.LinkedHashSet;
+-import java.util.Properties;
+-import java.util.Set;
+-import java.util.function.Function;
+-import java.util.stream.Collectors;
+-
+-
+-/**
+- * @author Vaclav Muzikar <vmuzikar@redhat.com>
+- */
+-public class ValidationMessages {
+-    private Set<ValidationMessage> messages = new LinkedHashSet<>();
+-
+-    public ValidationMessages() {}
+-
+-    public ValidationMessages(String... messages) {
+-        for (String message : messages) {
+-            add(message);
+-        }
+-    }
+-
+-    public void add(String message) {
+-        messages.add(new ValidationMessage(message));
+-    }
+-
+-    public void add(String message, String localizedMessageKey) {
+-        messages.add(new ValidationMessage(message, localizedMessageKey));
+-    }
+-
+-    public void add(String fieldId, String message, String localizedMessageKey) {
+-        ValidationMessage validationMessage = new ValidationMessage(message, localizedMessageKey);
+-        validationMessage.setFieldId(fieldId);
+-        add(validationMessage);
+-    }
+-
+-    public void add(ValidationMessage message) {
+-        messages.add(message);
+-    }
+-
+-    public boolean fieldHasError(String fieldId) {
+-        if (fieldId == null) {
+-            return false;
+-        }
+-        for (ValidationMessage message : messages) {
+-            if (fieldId.equals(message.getFieldId())) {
+-                return true;
+-            }
+-        }
+-        return false;
+-    }
+-
+-    public Set<ValidationMessage> getMessages() {
+-        return Collections.unmodifiableSet(messages);
+-    }
+-
+-    protected String getStringMessages(Function<? super ValidationMessage, ? extends String> function) {
+-        return messages.stream().map(function).collect(Collectors.joining("; "));
+-    }
+-
+-    public String getStringMessages() {
+-        return getStringMessages(ValidationMessage::getMessage);
+-    }
+-
+-    public String getStringMessages(Properties localizedMessages) {
+-        return getStringMessages(x -> x.getMessage(localizedMessages));
+-    }
+-}
+diff --git a/services/src/main/java/org/keycloak/validation/DefaultClientValidationProvider.java b/services/src/main/java/org/keycloak/validation/DefaultClientValidationProvider.java
+index 554c7a62cebf..12628df3c4f8 100644
+--- a/services/src/main/java/org/keycloak/validation/DefaultClientValidationProvider.java
++++ b/services/src/main/java/org/keycloak/validation/DefaultClientValidationProvider.java
+@@ -17,72 +17,189 @@
+ package org.keycloak.validation;
+ 
+ import org.keycloak.models.ClientModel;
++import org.keycloak.protocol.ProtocolMapperConfigException;
++import org.keycloak.protocol.oidc.mappers.PairwiseSubMapperHelper;
++import org.keycloak.protocol.oidc.utils.PairwiseSubMapperUtils;
++import org.keycloak.protocol.oidc.utils.PairwiseSubMapperValidator;
++import org.keycloak.protocol.oidc.utils.SubjectType;
++import org.keycloak.representations.idm.ProtocolMapperRepresentation;
++import org.keycloak.representations.oidc.OIDCClientRepresentation;
+ import org.keycloak.services.util.ResolveRelative;
+ 
+ import java.net.MalformedURLException;
+ import java.net.URI;
+ import java.net.URISyntaxException;
+-import java.net.URL;
++import java.util.HashSet;
++import java.util.List;
++import java.util.Set;
++
++import static org.keycloak.models.utils.ModelToRepresentation.toRepresentation;
+ 
+ public class DefaultClientValidationProvider implements ClientValidationProvider {
++    private enum FieldMessages {
++        ROOT_URL("rootUrl",
++                "Root URL is not a valid URL", "clientRootURLInvalid",
++                "Root URL must not contain an URL fragment", "clientRootURLFragmentError",
++                "Root URL uses an illegal scheme", "clientRootURLIllegalSchemeError"),
++
++        BASE_URL("baseUrl",
++                "Base URL is not a valid URL", "clientBaseURLInvalid",
++                null, null,
++                "Base URL uses an illegal scheme", "clientBaseURLIllegalSchemeError"),
++
++        REDIRECT_URIS("redirectUris",
++                "A redirect URI is not a valid URI", "clientRedirectURIsInvalid",
++                "Redirect URIs must not contain an URI fragment", "clientRedirectURIsFragmentError",
++                "A redirect URI uses an illegal scheme", "clientRedirectURIsIllegalSchemeError");
++
++        private String fieldId;
++
++        private String invalid;
++        private String invalidKey;
++
++        private String fragment;
++        private String fragmentKey;
++
++        private String scheme;
++        private String schemeKey;
++
++        FieldMessages(String fieldId, String invalid, String invalidKey, String fragment, String fragmentKey, String scheme, String schemeKey) {
++            this.fieldId = fieldId;
++            this.invalid = invalid;
++            this.invalidKey = invalidKey;
++            this.fragment = fragment;
++            this.fragmentKey = fragmentKey;
++            this.scheme = scheme;
++            this.schemeKey = schemeKey;
++        }
++
++        public String getFieldId() {
++            return fieldId;
++        }
++
++        public String getInvalid() {
++            return invalid;
++        }
+ 
+-    private ClientValidationContext context;
++        public String getInvalidKey() {
++            return invalidKey;
++        }
++
++        public String getFragment() {
++            return fragment;
++        }
++
++        public String getFragmentKey() {
++            return fragmentKey;
++        }
++
++        public String getScheme() {
++            return scheme;
++        }
++
++        public String getSchemeKey() {
++            return schemeKey;
++        }
++    }
+ 
+     // TODO Before adding more validation consider using a library for validation
+     @Override
+-    public void validate(ClientValidationContext context) {
+-        this.context = context;
++    public ValidationResult validate(ValidationContext<ClientModel> context) {
++        validateUrls(context);
++        validatePairwiseInClientModel(context);
+ 
+-        try {
+-            validate(context.getClient());
+-        } catch (ValidationException e) {
+-            context.invalid(e.getMessage());
+-        }
++        return context.toResult();
+     }
+ 
+-    private void validate(ClientModel client) throws ValidationException {
++    @Override
++    public ValidationResult validate(ClientValidationContext.OIDCContext context) {
++        validateUrls(context);
++        validatePairwiseInOIDCClient(context);
++
++        return context.toResult();
++    }
++
++    private void validateUrls(ValidationContext<ClientModel> context) {
++        ClientModel client = context.getObjectToValidate();
++
+         // Use a fake URL for validating relative URLs as we may not be validating clients in the context of a request (import at startup)
+         String authServerUrl = "https://localhost/auth";
+ 
+-        String resolvedRootUrl = ResolveRelative.resolveRootUrl(authServerUrl, authServerUrl, client.getRootUrl());
+-        String resolvedBaseUrl = ResolveRelative.resolveRelativeUri(authServerUrl, authServerUrl, resolvedRootUrl, client.getBaseUrl());
++        String rootUrl = ResolveRelative.resolveRootUrl(authServerUrl, authServerUrl, client.getRootUrl());
+ 
+-        validateRootUrl(resolvedRootUrl);
+-        validateBaseUrl(resolvedBaseUrl);
+-    }
++        // don't need to use actual rootUrl here as it'd interfere with others URL validations
++        String baseUrl = ResolveRelative.resolveRelativeUri(authServerUrl, authServerUrl, authServerUrl, client.getBaseUrl());
+ 
+-    private void validateRootUrl(String rootUrl) throws ValidationException {
+-        if (rootUrl != null && !rootUrl.isEmpty()) {
+-            basicHttpUrlCheck("rootUrl", rootUrl);
+-        }
++        checkUri(FieldMessages.ROOT_URL, rootUrl, context, true, true);
++        checkUri(FieldMessages.BASE_URL, baseUrl, context, true, false);
++        client.getRedirectUris().stream()
++                .map(u -> ResolveRelative.resolveRelativeUri(authServerUrl, authServerUrl, rootUrl, u))
++                .forEach(u -> checkUri(FieldMessages.REDIRECT_URIS, u, context, false, true));
+     }
+ 
+-    private void validateBaseUrl(String baseUrl) throws ValidationException {
+-        if (baseUrl != null && !baseUrl.isEmpty()) {
+-            basicHttpUrlCheck("baseUrl", baseUrl);
++    private void checkUri(FieldMessages field, String url, ValidationContext<ClientModel> context, boolean checkValidUrl, boolean checkFragment) {
++        if (url == null || url.isEmpty()) {
++            return;
+         }
+-    }
+ 
+-    private void basicHttpUrlCheck(String field, String url) throws ValidationException {
+-        boolean valid = true;
+         try {
+-            URI uri = new URL(url).toURI();
+-            if (uri.getScheme() == null || uri.getScheme().isEmpty()) {
++            URI uri = new URI(url);
++
++            boolean valid = true;
++            if (uri.getScheme() != null && (uri.getScheme().equals("data") || uri.getScheme().equals("javascript"))) {
++                context.addError(field.getFieldId(), field.getScheme(), field.getSchemeKey());
+                 valid = false;
+             }
+-        } catch (MalformedURLException | URISyntaxException e) {
+-            valid = false;
++
++            // KEYCLOAK-3421
++            if (checkFragment && uri.getFragment() != null) {
++                context.addError(field.getFieldId(), field.getFragment(), field.getFragmentKey());
++                valid = false;
++            }
++
++            // Don't check if URL is valid if there are other problems with it; otherwise it could lead to duplicit errors.
++            // This cannot be moved higher because it acts on differently based on environment (e.g. sometimes it checks
++            // scheme, sometimes it doesn't).
++            if (checkValidUrl && valid) {
++                uri.toURL(); // throws an exception
++            }
++        }
++        catch (MalformedURLException | IllegalArgumentException | URISyntaxException e) {
++            context.addError(field.getFieldId(), field.getInvalid(), field.getInvalidKey());
++        }
++    }
++
++    private void validatePairwiseInClientModel(ValidationContext<ClientModel> context) {
++        List<ProtocolMapperRepresentation> foundPairwiseMappers = PairwiseSubMapperUtils.getPairwiseSubMappers(toRepresentation(context.getObjectToValidate(), context.getSession()));
++
++        for (ProtocolMapperRepresentation foundPairwise : foundPairwiseMappers) {
++            String sectorIdentifierUri = PairwiseSubMapperHelper.getSectorIdentifierUri(foundPairwise);
++            validatePairwise(context, sectorIdentifierUri);
+         }
++    }
++
++    private void validatePairwiseInOIDCClient(ClientValidationContext.OIDCContext context) {
++        OIDCClientRepresentation oidcRep = context.getOIDCClient();
+ 
+-        if (!valid) {
+-            throw new ValidationException("Invalid URL in " + field);
++        SubjectType subjectType = SubjectType.parse(oidcRep.getSubjectType());
++        String sectorIdentifierUri = oidcRep.getSectorIdentifierUri();
++
++        // If sector_identifier_uri is in oidc config, then always validate it
++        if (SubjectType.PAIRWISE == subjectType || (sectorIdentifierUri != null && !sectorIdentifierUri.isEmpty())) {
++            validatePairwise(context, oidcRep.getSectorIdentifierUri());
+         }
+     }
+ 
+-    class ValidationException extends Exception {
++    private void validatePairwise(ValidationContext<ClientModel> context, String sectorIdentifierUri) {
++        ClientModel client = context.getObjectToValidate();
++        String rootUrl = client.getRootUrl();
++        Set<String> redirectUris = new HashSet<>();
++        if (client.getRedirectUris() != null) redirectUris.addAll(client.getRedirectUris());
+ 
+-        public ValidationException(String message) {
+-            super(message, null, false, false);
++        try {
++            PairwiseSubMapperValidator.validate(context.getSession(), rootUrl, redirectUris, sectorIdentifierUri);
++        } catch (ProtocolMapperConfigException e) {
++            context.addError("pairWise", e.getMessage(), e.getMessageKey());
+         }
+     }
+ 
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/ClientTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/ClientTest.java
+index 7f5642d63adc..ea5b0d42ae4d 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/ClientTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/ClientTest.java
+@@ -51,15 +51,19 @@
+ import javax.ws.rs.NotFoundException;
+ import javax.ws.rs.core.Response;
+ import java.io.IOException;
++import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.HashSet;
+ import java.util.LinkedList;
+ import java.util.List;
+ import java.util.Map;
++import java.util.Objects;
+ import java.util.Set;
+ import java.util.stream.Collectors;
+ 
++import static java.util.Arrays.asList;
+ import static org.hamcrest.CoreMatchers.is;
++import static org.hamcrest.Matchers.containsInAnyOrder;
+ import static org.junit.Assert.*;
+ import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude;
+ import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude.AuthServer;
+@@ -104,90 +108,101 @@ public void createClientVerify() {
+     }
+ 
+     @Test
+-    public void createClientValidation() {
+-        ClientRepresentation rep = new ClientRepresentation();
+-        rep.setClientId("my-app");
+-        rep.setDescription("my-app description");
+-        rep.setEnabled(true);
+-
+-        rep.setRootUrl("invalid");
+-        createClientExpectingValidationError(rep, "Invalid URL in rootUrl");
+-
+-        rep.setRootUrl(null);
+-        rep.setBaseUrl("invalid");
+-        createClientExpectingValidationError(rep, "Invalid URL in baseUrl");
+-
+-        rep.setRootUrl(null);
+-        rep.setBaseUrl("/valid");
+-        createClientExpectingSuccessfulClientCreation(rep);
+-
+-        rep.setRootUrl("");
+-        rep.setBaseUrl("/valid");
+-        createClientExpectingSuccessfulClientCreation(rep);
++    public void testInvalidUrlClientValidation() {
++        testClientUriValidation("Root URL is not a valid URL",
++                "Base URL is not a valid URL",
++                null,
++                "invalid", "myapp://some-fake-app");
+     }
+ 
+     @Test
+-    public void updateClientValidation() {
+-        ClientRepresentation rep = createClient();
+-
+-        rep.setClientId("my-app");
+-        rep.setDescription("my-app description");
+-        rep.setEnabled(true);
+-
+-        rep.setRootUrl("invalid");
+-        updateClientExpectingValidationError(rep, "Invalid URL in rootUrl");
+-
+-        rep.setRootUrl(null);
+-        rep.setBaseUrl("invalid");
+-        updateClientExpectingValidationError(rep, "Invalid URL in baseUrl");
+-
+-        ClientRepresentation stored = realm.clients().get(rep.getId()).toRepresentation();
+-        assertNull(stored.getRootUrl());
+-        assertNull(stored.getBaseUrl());
++    public void testIllegalSchemeClientValidation() {
++        testClientUriValidation("Root URL uses an illegal scheme",
++                "Base URL uses an illegal scheme",
++                "A redirect URI uses an illegal scheme",
++                "data:text/html;base64,PHNjcmlwdD5jb25maXJtKGRvY3VtZW50LmRvbWFpbik7PC9zY3JpcHQ+",
++                "javascript:confirm(document.domain)/*"
++        );
++    }
+ 
+-        rep.setRootUrl(null);
+-        rep.setBaseUrl("/valid");
+-        updateClientExpectingSuccessfulClientUpdate(rep, null, "/valid");
++    // KEYCLOAK-3421
++    @Test
++    public void testFragmentProhibitedClientValidation() {
++        testClientUriValidation("Root URL must not contain an URL fragment",
++                null,
++                "Redirect URIs must not contain an URI fragment",
++                "http://redhat.com/abcd#someFragment"
++        );
++    }
+ 
+-        rep.setRootUrl("");
+-        rep.setBaseUrl("/valid");
+-        updateClientExpectingSuccessfulClientUpdate(rep, "", "/valid");
++    private void testClientUriValidation(String expectedRootUrlError, String expectedBaseUrlError, String expectedRedirectUrisError, String... testUrls) {
++        testClientUriValidation(false, expectedRootUrlError, expectedBaseUrlError, expectedRedirectUrisError, testUrls);
++        testClientUriValidation(true, expectedRootUrlError, expectedBaseUrlError, expectedRedirectUrisError, testUrls);
+     }
+ 
+-    private void createClientExpectingValidationError(ClientRepresentation rep, String expectedError) {
+-        Response response = realm.clients().create(rep);
++    private void testClientUriValidation(boolean create, String expectedRootUrlError, String expectedBaseUrlError, String expectedRedirectUrisError, String... testUrls) {
++        ClientRepresentation rep;
++        if (create) {
++            rep = new ClientRepresentation();
++            rep.setClientId("my-app2");
++            rep.setEnabled(true);
++        }
++        else {
++            rep = createClient();
++        }
+ 
+-        assertEquals(400, response.getStatus());
+-        OAuth2ErrorRepresentation error = response.readEntity(OAuth2ErrorRepresentation.class);
+-        assertEquals("invalid_input", error.getError());
+-        assertEquals(expectedError, error.getErrorDescription());
++        for (String testUrl : testUrls) {
++            if (expectedRootUrlError != null) {
++                rep.setRootUrl(testUrl);
++                createOrUpdateClientExpectingValidationErrors(rep, create, expectedRootUrlError);
++            }
++            rep.setRootUrl(null);
+ 
+-        assertNull(response.getLocation());
++            if (expectedBaseUrlError != null) {
++                rep.setBaseUrl(testUrl);
++                createOrUpdateClientExpectingValidationErrors(rep, create, expectedBaseUrlError);
++            }
++            rep.setBaseUrl(null);
+ 
+-        response.close();
+-    }
++            if (expectedRedirectUrisError != null) {
++                rep.setRedirectUris(Collections.singletonList(testUrl));
++                createOrUpdateClientExpectingValidationErrors(rep, create, expectedRedirectUrisError);
++            }
++            rep.setRedirectUris(null);
+ 
+-    private void createClientExpectingSuccessfulClientCreation(ClientRepresentation rep) {
+-        Response response = realm.clients().create(rep);
+-        assertEquals(201, response.getStatus());
++            if (expectedRootUrlError != null) rep.setRootUrl(testUrl);
++            if (expectedBaseUrlError != null) rep.setBaseUrl(testUrl);
++            if (expectedRedirectUrisError != null) rep.setRedirectUris(Collections.singletonList(testUrl));
++            createOrUpdateClientExpectingValidationErrors(rep, create, expectedRootUrlError, expectedBaseUrlError, expectedRedirectUrisError);
+ 
+-        String id = ApiUtil.getCreatedId(response);
+-        realm.clients().get(id).remove();
+-
+-        response.close();
++            rep.setRootUrl(null);
++            rep.setBaseUrl(null);
++            rep.setRedirectUris(null);
++        }
+     }
+ 
+-    private void updateClientExpectingValidationError(ClientRepresentation rep, String expectedError) {
+-        try {
+-            realm.clients().get(rep.getId()).update(rep);
+-            fail("Expected exception");
+-        } catch (BadRequestException e) {
+-            Response response = e.getResponse();
+-            assertEquals(400, response.getStatus());
+-            OAuth2ErrorRepresentation error = response.readEntity(OAuth2ErrorRepresentation.class);
+-            assertEquals("invalid_input", error.getError());
+-            assertEquals(expectedError, error.getErrorDescription());
++    private void createOrUpdateClientExpectingValidationErrors(ClientRepresentation rep, boolean create, String... expectedErrors) {
++        Response response = null;
++        if (create) {
++            response = realm.clients().create(rep);
+         }
++        else {
++            try {
++                realm.clients().get(rep.getId()).update(rep);
++                fail("Expected exception");
++            }
++            catch (BadRequestException e) {
++                response = e.getResponse();
++            }
++        }
++
++        expectedErrors = Arrays.stream(expectedErrors).filter(Objects::nonNull).toArray(String[]::new);
++
++        assertEquals(response.getStatus(), 400);
++        OAuth2ErrorRepresentation errorRep = response.readEntity(OAuth2ErrorRepresentation.class);
++        List<String> actualErrors = asList(errorRep.getErrorDescription().split("; "));
++        assertThat(actualErrors, containsInAnyOrder(expectedErrors));
++        assertEquals("invalid_input", errorRep.getError());
+     }
+ 
+     private void updateClientExpectingSuccessfulClientUpdate(ClientRepresentation rep, String expectedRootUrl, String expectedBaseUrl) {
+@@ -369,55 +384,6 @@ public void serviceAccount() {
+         assertNull(userRep.getEmail());
+     }
+ 
+-    // KEYCLOAK-3421
+-    @Test
+-    public void createClientWithFragments() {
+-        ClientRepresentation client = ClientBuilder.create()
+-                .clientId("client-with-fragment")
+-                .rootUrl("http://localhost/base#someFragment")
+-                .redirectUris("http://localhost/auth", "http://localhost/auth#fragment", "http://localhost/auth*", "/relative")
+-                .build();
+-
+-        Response response = realm.clients().create(client);
+-        assertUriFragmentError(response);
+-    }
+-
+-    // KEYCLOAK-3421
+-    @Test
+-    public void updateClientWithFragments() {
+-        ClientRepresentation client = ClientBuilder.create()
+-                .clientId("client-with-fragment")
+-                .redirectUris("http://localhost/auth", "http://localhost/auth*")
+-                .build();
+-        Response response = realm.clients().create(client);
+-        String clientUuid = ApiUtil.getCreatedId(response);
+-        ClientResource clientResource = realm.clients().get(clientUuid);
+-        getCleanup().addClientUuid(clientUuid);
+-        response.close();
+-
+-        client = clientResource.toRepresentation();
+-        client.setRootUrl("http://localhost/base#someFragment");
+-        List<String> redirectUris = client.getRedirectUris();
+-        redirectUris.add("http://localhost/auth#fragment");
+-        redirectUris.add("/relative");
+-        client.setRedirectUris(redirectUris);
+-
+-        try {
+-            clientResource.update(client);
+-            fail("Should fail");
+-        }
+-        catch (BadRequestException e) {
+-            assertUriFragmentError(e.getResponse());
+-        }
+-    }
+-
+-    private void assertUriFragmentError(Response response) {
+-        assertEquals(response.getStatus(), 400);
+-        String error = response.readEntity(OAuth2ErrorRepresentation.class).getError();
+-        assertTrue("Error response doesn't mention Redirect URIs fragments", error.contains("Redirect URIs must not contain an URI fragment"));
+-        assertTrue("Error response doesn't mention Root URL fragments", error.contains("Root URL must not contain an URL fragment"));
+-    }
+-
+     @Test
+     public void pushRevocation() {
+         testingClient.testApp().clearAdminActions();
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/authz/AuthorizationAPITest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/authz/AuthorizationAPITest.java
+index c58b0572c44f..7784d99a028f 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/authz/AuthorizationAPITest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/authz/AuthorizationAPITest.java
+@@ -20,6 +20,7 @@
+ import static org.junit.Assert.assertNotNull;
+ 
+ import java.io.IOException;
++import java.util.Collections;
+ import java.util.List;
+ 
+ import javax.ws.rs.core.Response;
+@@ -44,6 +45,7 @@
+ import org.keycloak.testsuite.Assert;
+ import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude;
+ import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude.AuthServer;
++import org.keycloak.testsuite.client.resources.TestApplicationResourceUrls;
+ import org.keycloak.testsuite.util.ClientBuilder;
+ import org.keycloak.testsuite.util.OAuthClient;
+ import org.keycloak.testsuite.util.RealmBuilder;
+@@ -83,7 +85,7 @@ public void addTestRealms(List<RealmRepresentation> testRealms) {
+                     .redirectUris("http://localhost/resource-server-test")
+                     .defaultRoles("uma_protection")
+                     .directAccessGrants()
+-                    .pairwise("http://pairwise.com"))
++                    .pairwise(TestApplicationResourceUrls.pairwiseSectorIdentifierUri()))
+                 .client(ClientBuilder.create().clientId(TEST_CLIENT)
+                     .secret("secret")
+                     .authorizationServicesEnabled(true)
+@@ -95,6 +97,8 @@ public void addTestRealms(List<RealmRepresentation> testRealms) {
+                         .redirectUris("http://localhost/test-client")
+                         .directAccessGrants())
+                 .build());
++
++        testingClient.testApp().oidcClientEndpoints().setSectorIdentifierRedirectUris(Collections.singletonList("http://localhost/resource-server-test"));
+     }
+ 
+     @Before
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/authz/EntitlementAPITest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/authz/EntitlementAPITest.java
+index ce8665c46586..d4dcb1f9e95e 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/authz/EntitlementAPITest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/authz/EntitlementAPITest.java
+@@ -93,6 +93,7 @@
+ import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude;
+ import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude.AuthServer;
+ import org.keycloak.testsuite.admin.ApiUtil;
++import org.keycloak.testsuite.client.resources.TestApplicationResourceUrls;
+ import org.keycloak.testsuite.util.ClientBuilder;
+ import org.keycloak.testsuite.util.OAuthClient;
+ import org.keycloak.testsuite.util.RealmBuilder;
+@@ -142,7 +143,7 @@ public void addTestRealms(List<RealmRepresentation> testRealms) {
+                         .authorizationServicesEnabled(true)
+                         .redirectUris("http://localhost/resource-server-test")
+                         .defaultRoles("uma_protection")
+-                        .pairwise("http://pairwise.com")
++                        .pairwise(TestApplicationResourceUrls.pairwiseSectorIdentifierUri())
+                         .directAccessGrants())
+                 .client(ClientBuilder.create().clientId(TEST_CLIENT)
+                         .secret("secret")
+@@ -153,13 +154,19 @@ public void addTestRealms(List<RealmRepresentation> testRealms) {
+                         .secret("secret")
+                         .authorizationServicesEnabled(true)
+                         .redirectUris("http://localhost/test-client")
+-                        .pairwise("http://pairwise.com")
++                        .pairwise(TestApplicationResourceUrls.pairwiseSectorIdentifierUri())
+                         .directAccessGrants())
+                 .client(ClientBuilder.create().clientId(PUBLIC_TEST_CLIENT)
+                         .secret("secret")
+                         .redirectUris("http://localhost:8180/auth/realms/master/app/auth/*", "https://localhost:8543/auth/realms/master/app/auth/*")
+                         .publicClient())
+                 .build());
++
++        configureSectorIdentifierRedirectUris();
++    }
++
++    private void configureSectorIdentifierRedirectUris() {
++        testingClient.testApp().oidcClientEndpoints().setSectorIdentifierRedirectUris(Arrays.asList("http://localhost/resource-server-test", "http://localhost/test-client"));
+     }
+ 
+     @Before
+@@ -1936,6 +1943,7 @@ public void testOfflineRequestingPartyToken() throws Exception {
+         controller.stop(suiteContext.getAuthServerInfo().getQualifier());
+         controller.start(suiteContext.getAuthServerInfo().getQualifier());
+         reconnectAdminClient();
++        configureSectorIdentifierRedirectUris();
+ 
+         TokenIntrospectionResponse introspectionResponse = authzClient.protection().introspectRequestingPartyToken(response.getToken());
+ 
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/client/ClientRegistrationTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/client/ClientRegistrationTest.java
+index 50f837e4db66..81ca0373c0e8 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/client/ClientRegistrationTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/client/ClientRegistrationTest.java
+@@ -28,14 +28,19 @@
+ import org.keycloak.representations.idm.ProtocolMapperRepresentation;
+ import org.keycloak.representations.idm.UserRepresentation;
+ import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude;
+-import org.keycloak.services.clientregistration.ErrorCodes;
++import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude.AuthServer;
+ import org.keycloak.util.JsonSerialization;
+ 
+ import javax.ws.rs.NotFoundException;
+ import java.io.IOException;
+ import java.util.ArrayList;
++import java.util.Arrays;
+ import java.util.Collections;
++import java.util.List;
++import java.util.Objects;
+ 
++import static java.util.Arrays.asList;
++import static org.hamcrest.Matchers.containsInAnyOrder;
+ import static org.hamcrest.Matchers.nullValue;
+ import static org.hamcrest.core.Is.is;
+ import static org.junit.Assert.assertEquals;
+@@ -43,7 +48,8 @@
+ import static org.junit.Assert.assertNull;
+ import static org.junit.Assert.assertThat;
+ import static org.junit.Assert.fail;
+-import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude.AuthServer;
++import static org.keycloak.services.clientregistration.ErrorCodes.INVALID_CLIENT_METADATA;
++import static org.keycloak.services.clientregistration.ErrorCodes.INVALID_REDIRECT_URI;
+ 
+ /**
+  * @author <a href="mailto:sthorger@redhat.com">Stian Thorgersen</a>
+@@ -161,45 +167,112 @@ public void registerClientWithNonAsciiChars() throws ClientRegistrationException
+     }
+ 
+     @Test
+-    public void registerClientValidation() throws IOException {
+-    	authCreateClients();
+-    	ClientRepresentation client = buildClient();
+-    	client.setRootUrl("invalid");
+-
+-    	try {
+-            registerClient(client);
+-        } catch (ClientRegistrationException e) {
+-            HttpErrorException c = (HttpErrorException) e.getCause();
+-            assertEquals(400, c.getStatusLine().getStatusCode());
+-
+-            OAuth2ErrorRepresentation error = JsonSerialization.readValue(c.getErrorResponse(), OAuth2ErrorRepresentation.class);
++    public void testInvalidUrlClientValidation() {
++        testClientUriValidation("Root URL is not a valid URL",
++                "Base URL is not a valid URL",
++                null,
++                "invalid", "myapp://some-fake-app");
++    }
+ 
+-            assertEquals("invalid_client_metadata", error.getError());
+-            assertEquals("Invalid URL in rootUrl", error.getErrorDescription());
+-        }
++    @Test
++    public void testIllegalSchemeClientValidation() {
++        testClientUriValidation("Root URL uses an illegal scheme",
++                "Base URL uses an illegal scheme",
++                "A redirect URI uses an illegal scheme",
++                "data:text/html;base64,PHNjcmlwdD5jb25maXJtKGRvY3VtZW50LmRvbWFpbik7PC9zY3JpcHQ+",
++                "javascript:confirm(document.domain)/*"
++        );
+     }
+ 
++    // KEYCLOAK-3421
+     @Test
+-    public void updateClientValidation() throws IOException, ClientRegistrationException {
+-        registerClientAsAdmin();
++    public void testFragmentProhibitedClientValidation() {
++        testClientUriValidation("Root URL must not contain an URL fragment",
++                null,
++                "Redirect URIs must not contain an URI fragment",
++                "http://redhat.com/abcd#someFragment"
++        );
++    }
+ 
+-        ClientRepresentation client = reg.get(CLIENT_ID);
+-        client.setRootUrl("invalid");
++    private void testClientUriValidation(String expectedRootUrlError, String expectedBaseUrlError, String expectedRedirectUrisError, String... testUrls) {
++        testClientUriValidation(true, expectedRootUrlError, expectedBaseUrlError, expectedRedirectUrisError, testUrls);
++        testClientUriValidation(false, expectedRootUrlError, expectedBaseUrlError, expectedRedirectUrisError, testUrls);
++    }
+ 
+-    	try {
+-            reg.update(client);
+-        } catch (ClientRegistrationException e) {
+-            HttpErrorException c = (HttpErrorException) e.getCause();
+-            assertEquals(400, c.getStatusLine().getStatusCode());
++    private void testClientUriValidation(boolean register, String expectedRootUrlError, String expectedBaseUrlError, String expectedRedirectUrisError, String... testUrls) {
++        ClientRepresentation rep;
++        if (register) {
++            authCreateClients();
++            rep = buildClient();
++        }
++        else {
++            try {
++                registerClientAsAdmin();
++                rep = reg.get(CLIENT_ID);
++            }
++            catch (ClientRegistrationException e) {
++                throw new RuntimeException(e);
++            }
++        }
+ 
+-            OAuth2ErrorRepresentation error = JsonSerialization.readValue(c.getErrorResponse(), OAuth2ErrorRepresentation.class);
++        for (String testUrl : testUrls) {
++            if (expectedRootUrlError != null) {
++                rep.setRootUrl(testUrl);
++                registerOrUpdateClientExpectingValidationErrors(rep, register, false, expectedRootUrlError);
++            }
++            rep.setRootUrl(null);
++
++            if (expectedBaseUrlError != null) {
++                rep.setBaseUrl(testUrl);
++                registerOrUpdateClientExpectingValidationErrors(rep, register, false, expectedBaseUrlError);
++            }
++            rep.setBaseUrl(null);
++
++            if (expectedRedirectUrisError != null) {
++                rep.setRedirectUris(Collections.singletonList(testUrl));
++                registerOrUpdateClientExpectingValidationErrors(rep, register, true, expectedRedirectUrisError);
++            }
++            rep.setRedirectUris(null);
++
++            if (expectedRootUrlError != null) rep.setRootUrl(testUrl);
++            if (expectedBaseUrlError != null) rep.setBaseUrl(testUrl);
++            if (expectedRedirectUrisError != null) rep.setRedirectUris(Collections.singletonList(testUrl));
++            registerOrUpdateClientExpectingValidationErrors(rep, register, expectedRedirectUrisError != null, expectedRootUrlError, expectedBaseUrlError, expectedRedirectUrisError);
++
++            rep.setRootUrl(null);
++            rep.setBaseUrl(null);
++            rep.setRedirectUris(null);
++        }
++    }
+ 
+-            assertEquals("invalid_client_metadata", error.getError());
+-            assertEquals("Invalid URL in rootUrl", error.getErrorDescription());
++    private void registerOrUpdateClientExpectingValidationErrors(ClientRepresentation rep, boolean register, boolean redirectUris, String... expectedErrors) {
++        HttpErrorException errorException = null;
++        try {
++            if (register) {
++                registerClient(rep);
++            }
++            else {
++                reg.update(rep);
++            }
++            fail("Expected exception");
++        }
++        catch (ClientRegistrationException e) {
++            errorException = (HttpErrorException) e.getCause();
+         }
+ 
+-        ClientRepresentation updatedClient = reg.get(CLIENT_ID);
+-        assertNull(updatedClient.getRootUrl());
++        expectedErrors = Arrays.stream(expectedErrors).filter(Objects::nonNull).toArray(String[]::new);
++
++        assertEquals(errorException.getStatusLine().getStatusCode(), 400);
++        OAuth2ErrorRepresentation errorRep;
++        try {
++            errorRep = JsonSerialization.readValue(errorException.getErrorResponse(), OAuth2ErrorRepresentation.class);
++        }
++        catch (IOException e) {
++            throw new RuntimeException(e);
++        }
++        List<String> actualErrors = asList(errorRep.getErrorDescription().split("; "));
++        assertThat(actualErrors, containsInAnyOrder(expectedErrors));
++        assertEquals(redirectUris ? INVALID_REDIRECT_URI : INVALID_CLIENT_METADATA, errorRep.getError());
+     }
+ 
+     @Test
+diff --git a/themes/src/main/resources/theme/base/admin/messages/messages_en.properties b/themes/src/main/resources/theme/base/admin/messages/messages_en.properties
+index 6a870247dd0b..c9bf2ecb291f 100644
+--- a/themes/src/main/resources/theme/base/admin/messages/messages_en.properties
++++ b/themes/src/main/resources/theme/base/admin/messages/messages_en.properties
+@@ -22,6 +22,13 @@ ldapErrorMissingGroupsPathGroup=Groups path group does not exist - please create
+ 
+ clientRedirectURIsFragmentError=Redirect URIs must not contain an URI fragment
+ clientRootURLFragmentError=Root URL must not contain an URL fragment
++clientRootURLIllegalSchemeError=Root URL uses an illegal scheme
++clientBaseURLIllegalSchemeError=Base URL uses an illegal scheme
++clientRedirectURIsIllegalSchemeError=A redirect URI uses an illegal scheme
++clientBaseURLInvalid=Base URL is not a valid URL
++clientRootURLInvalid=Root URL is not a valid URL
++clientRedirectURIsInvalid=A redirect URI is not a valid URI
++
+ 
+ pairwiseMalformedClientRedirectURI=Client contained an invalid redirect URI.
+ pairwiseClientRedirectURIsMissingHost=Client redirect URIs must contain a valid host component.

@@ -1,0 +1,104 @@
+diff --git a/batik-svgrasterizer/src/main/java/org/apache/batik/apps/rasterizer/Main.java b/batik-svgrasterizer/src/main/java/org/apache/batik/apps/rasterizer/Main.java
+index c70b4dd691..a4248b527d 100644
+--- a/batik-svgrasterizer/src/main/java/org/apache/batik/apps/rasterizer/Main.java
++++ b/batik-svgrasterizer/src/main/java/org/apache/batik/apps/rasterizer/Main.java
+@@ -501,6 +501,12 @@ public Color parseARGB(String argbVal){
+     public static String CL_OPTION_CONSTRAIN_SCRIPT_ORIGIN_DESCRIPTION
+         = Messages.get("Main.cl.option.constrain.script.origin.description", "No description");
+ 
++    public static String CL_OPTION_BLOCK_EXTERNAL_RESOURCES
++            = Messages.get("Main.cl.option.block.external.resources", "-blockExternalResources");
++
++    public static String CL_OPTION_BLOCK_EXTERNAL_RESOURCES_DESCRIPTION
++            = Messages.get("Main.cl.option.block.external.resources.description", "No description");
++
+     /**
+      * Option to turn off secure execution of scripts
+      */
+@@ -829,6 +835,17 @@ public String getOptionDescription(){
+                               return CL_OPTION_SECURITY_OFF_DESCRIPTION;
+                           }
+                       });
++
++        optionMap.put(CL_OPTION_BLOCK_EXTERNAL_RESOURCES,
++                new NoValueOptionHandler(){
++                    public void handleOption(SVGConverter c){
++                        c.allowExternalResources = false;
++                    }
++
++                    public String getOptionDescription(){
++                        return CL_OPTION_BLOCK_EXTERNAL_RESOURCES_DESCRIPTION;
++                    }
++                });
+     }
+ 
+     /**
+diff --git a/batik-svgrasterizer/src/main/java/org/apache/batik/apps/rasterizer/SVGConverter.java b/batik-svgrasterizer/src/main/java/org/apache/batik/apps/rasterizer/SVGConverter.java
+index 324c3abcfe..9ec2135458 100644
+--- a/batik-svgrasterizer/src/main/java/org/apache/batik/apps/rasterizer/SVGConverter.java
++++ b/batik-svgrasterizer/src/main/java/org/apache/batik/apps/rasterizer/SVGConverter.java
+@@ -253,6 +253,8 @@ public class SVGConverter {
+         the document which references them. */
+     protected boolean constrainScriptOrigin = true;
+ 
++    protected boolean allowExternalResources = true;
++
+     /** Controls whether scripts should be run securely or not */
+     protected boolean securityOff = false;
+ 
+@@ -925,6 +927,10 @@ protected Map computeTranscodingHints(){
+             map.put(ImageTranscoder.KEY_CONSTRAIN_SCRIPT_ORIGIN, Boolean.FALSE);
+         }
+ 
++        if (!allowExternalResources) {
++            map.put(ImageTranscoder.KEY_ALLOW_EXTERNAL_RESOURCES, Boolean.FALSE);
++        }
++
+         return map;
+     }
+ 
+diff --git a/batik-transcoder/src/main/java/org/apache/batik/transcoder/SVGAbstractTranscoder.java b/batik-transcoder/src/main/java/org/apache/batik/transcoder/SVGAbstractTranscoder.java
+index 65d983bfae..8d6ffe3b1f 100644
+--- a/batik-transcoder/src/main/java/org/apache/batik/transcoder/SVGAbstractTranscoder.java
++++ b/batik-transcoder/src/main/java/org/apache/batik/transcoder/SVGAbstractTranscoder.java
+@@ -33,8 +33,10 @@ Licensed to the Apache Software Foundation (ASF) under one or more
+ import org.apache.batik.bridge.BridgeContext;
+ import org.apache.batik.bridge.BridgeException;
+ import org.apache.batik.bridge.DefaultScriptSecurity;
++import org.apache.batik.bridge.ExternalResourceSecurity;
+ import org.apache.batik.bridge.GVTBuilder;
+ import org.apache.batik.bridge.NoLoadScriptSecurity;
++import org.apache.batik.bridge.NoLoadExternalResourceSecurity;
+ import org.apache.batik.bridge.RelaxedScriptSecurity;
+ import org.apache.batik.bridge.SVGUtilities;
+ import org.apache.batik.bridge.ScriptSecurity;
+@@ -877,6 +879,9 @@ protected void setImageSize(float docWidth, float docHeight) {
+         = new BooleanKey();
+ 
+ 
++    public static final TranscodingHints.Key KEY_ALLOW_EXTERNAL_RESOURCES
++            = new BooleanKey();
++
+     /**
+      * A user agent implementation for <code>PrintTranscoder</code>.
+      */
+@@ -1109,5 +1114,19 @@ protected void computeAllowedScripts(){
+             }
+         }
+ 
++        public ExternalResourceSecurity getExternalResourceSecurity(ParsedURL resourceURL, ParsedURL docURL) {
++            if (isAllowExternalResources()) {
++                return super.getExternalResourceSecurity(resourceURL, docURL);
++            }
++            return new NoLoadExternalResourceSecurity();
++        }
++
++        public boolean isAllowExternalResources() {
++            Boolean b = (Boolean)SVGAbstractTranscoder.this.hints.get(KEY_ALLOW_EXTERNAL_RESOURCES);
++            if (b != null) {
++                return b;
++            }
++            return true;
++        }
+     }
+ }

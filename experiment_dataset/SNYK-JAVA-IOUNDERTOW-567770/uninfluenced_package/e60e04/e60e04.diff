@@ -1,0 +1,175 @@
+diff --git a/core/src/main/java/io/undertow/UndertowOptions.java b/core/src/main/java/io/undertow/UndertowOptions.java
+index 3b555514df..6df7e08b31 100644
+--- a/core/src/main/java/io/undertow/UndertowOptions.java
++++ b/core/src/main/java/io/undertow/UndertowOptions.java
+@@ -354,6 +354,14 @@ public class UndertowOptions {
+      */
+     public static final Option<Integer> QUEUED_FRAMES_LOW_WATER_MARK = Option.simple(UndertowOptions.class, "QUEUED_FRAMES_LOW_WATER_MARK", Integer.class);
+ 
++    /**
++     * The AJP protocol itself supports the passing of arbitrary request attributes.
++     * The reverse proxy passes various information to the AJP connector using request attributes through AJP protocol.
++     * Unrecognised request attributes will be ignored unless the entire attribute name matches this regular expression.
++     *
++     * If not specified, the default value is null.
++     */
++    public static final Option<String> AJP_ALLOWED_REQUEST_ATTRIBUTES_PATTERN = Option.simple(UndertowOptions.class, "AJP_ALLOWED_REQUEST_ATTRIBUTES_PATTERN", String.class);
+ 
+ 
+     private UndertowOptions() {
+diff --git a/core/src/main/java/io/undertow/server/protocol/ajp/AjpOpenListener.java b/core/src/main/java/io/undertow/server/protocol/ajp/AjpOpenListener.java
+index 1bf0fa0335..6ea9c66cc1 100644
+--- a/core/src/main/java/io/undertow/server/protocol/ajp/AjpOpenListener.java
++++ b/core/src/main/java/io/undertow/server/protocol/ajp/AjpOpenListener.java
+@@ -55,6 +55,8 @@
+  */
+ public class AjpOpenListener implements OpenListener {
+ 
++    private static final String DEFAULT_AJP_ALLOWED_REQUEST_ATTRIBUTES_PATTERN = SecurityActions.getSystemProperty("io.undertow.ajp.allowedRequestAttributesPattern");
++
+     private final Set<AjpServerConnection> connections = Collections.newSetFromMap(new ConcurrentHashMap<>());
+ 
+     private final ByteBufferPool bufferPool;
+@@ -96,7 +98,7 @@ public AjpOpenListener(final ByteBufferPool pool, final OptionMap undertowOption
+         PooledByteBuffer buf = pool.allocate();
+         this.bufferSize = buf.getBuffer().remaining();
+         buf.close();
+-        parser = new AjpRequestParser(undertowOptions.get(URL_CHARSET, StandardCharsets.UTF_8.name()), undertowOptions.get(DECODE_URL, true), undertowOptions.get(UndertowOptions.MAX_PARAMETERS, UndertowOptions.DEFAULT_MAX_PARAMETERS), undertowOptions.get(UndertowOptions.MAX_HEADERS, UndertowOptions.DEFAULT_MAX_HEADERS), undertowOptions.get(UndertowOptions.ALLOW_ENCODED_SLASH, false), undertowOptions.get(UndertowOptions.ALLOW_UNESCAPED_CHARACTERS_IN_URL, false));
++        parser = new AjpRequestParser(undertowOptions.get(URL_CHARSET, StandardCharsets.UTF_8.name()), undertowOptions.get(DECODE_URL, true), undertowOptions.get(UndertowOptions.MAX_PARAMETERS, UndertowOptions.DEFAULT_MAX_PARAMETERS), undertowOptions.get(UndertowOptions.MAX_HEADERS, UndertowOptions.DEFAULT_MAX_HEADERS), undertowOptions.get(UndertowOptions.ALLOW_ENCODED_SLASH, false), undertowOptions.get(UndertowOptions.ALLOW_UNESCAPED_CHARACTERS_IN_URL, false), undertowOptions.get(UndertowOptions.AJP_ALLOWED_REQUEST_ATTRIBUTES_PATTERN, DEFAULT_AJP_ALLOWED_REQUEST_ATTRIBUTES_PATTERN));
+         connectorStatistics = new ConnectorStatisticsImpl();
+         statisticsEnabled = undertowOptions.get(UndertowOptions.ENABLE_CONNECTOR_STATISTICS, false);
+     }
+diff --git a/core/src/main/java/io/undertow/server/protocol/ajp/AjpRequestParser.java b/core/src/main/java/io/undertow/server/protocol/ajp/AjpRequestParser.java
+index 5dfa6dcb41..f011421a45 100644
+--- a/core/src/main/java/io/undertow/server/protocol/ajp/AjpRequestParser.java
++++ b/core/src/main/java/io/undertow/server/protocol/ajp/AjpRequestParser.java
+@@ -50,6 +50,8 @@
+ import java.io.UnsupportedEncodingException;
+ import java.nio.ByteBuffer;
+ import java.util.TreeMap;
++import java.util.regex.Matcher;
++import java.util.regex.Pattern;
+ 
+ import io.undertow.UndertowLogger;
+ import io.undertow.UndertowMessages;
+@@ -67,7 +69,6 @@
+  */
+ public class AjpRequestParser {
+ 
+-
+     private final String encoding;
+     private final boolean doDecode;
+     private final boolean allowEncodedSlash;
+@@ -75,6 +76,7 @@ public class AjpRequestParser {
+     private final int maxHeaders;
+     private StringBuilder decodeBuffer;
+     private final boolean allowUnescapedCharactersInUrl;
++    private final Pattern allowedRequestAttributesPattern;
+ 
+     private static final HttpString[] HTTP_HEADERS;
+ 
+@@ -178,12 +180,21 @@ public class AjpRequestParser {
+     }
+ 
+     public AjpRequestParser(String encoding, boolean doDecode, int maxParameters, int maxHeaders, boolean allowEncodedSlash, boolean allowUnescapedCharactersInUrl) {
++        this(encoding, doDecode, maxParameters, maxHeaders, allowEncodedSlash, allowUnescapedCharactersInUrl, null);
++    }
++
++    public AjpRequestParser(String encoding, boolean doDecode, int maxParameters, int maxHeaders, boolean allowEncodedSlash, boolean allowUnescapedCharactersInUrl, String allowedRequestAttributesPattern) {
+         this.encoding = encoding;
+         this.doDecode = doDecode;
+         this.maxParameters = maxParameters;
+         this.maxHeaders = maxHeaders;
+         this.allowEncodedSlash = allowEncodedSlash;
+         this.allowUnescapedCharactersInUrl = allowUnescapedCharactersInUrl;
++        if (allowedRequestAttributesPattern != null && !allowedRequestAttributesPattern.isEmpty()) {
++            this.allowedRequestAttributesPattern = Pattern.compile(allowedRequestAttributesPattern);
++        } else {
++            this.allowedRequestAttributesPattern = null;
++        }
+     }
+ 
+ 
+@@ -458,12 +469,28 @@ public void parse(final ByteBuffer buf, final AjpRequestParseState state, final
+                         state.sslCert = result;
+                     } else if (state.currentAttribute.equals(SSL_KEY_SIZE)) {
+                         state.sslKeySize = result;
+-                    }  else {
+-                        //other attributes
+-                        if(state.attributes == null) {
++                    } else {
++                        // other attributes
++                        if (state.attributes == null) {
+                             state.attributes = new TreeMap<>();
+                         }
+-                        state.attributes.put(state.currentAttribute, result);
++                        boolean isUnknownAttribute = true;
++                        // known attirubtes
++                        for (String attr : ATTRIBUTES) {
++                            if (state.currentAttribute.equals(attr)) {
++                                state.attributes.put(state.currentAttribute, result);
++                                isUnknownAttribute = false;
++                                break;
++                            }
++                        }
++                        // unknown attributes
++                        if (isUnknownAttribute && allowedRequestAttributesPattern != null) {
++                            // custom allowed attributes
++                            Matcher m = allowedRequestAttributesPattern.matcher(state.currentAttribute);
++                            if (m.matches()) {
++                                state.attributes.put(state.currentAttribute, result);
++                            }
++                        }
+                     }
+                     state.currentAttribute = null;
+                 }
+diff --git a/core/src/main/java/io/undertow/server/protocol/ajp/SecurityActions.java b/core/src/main/java/io/undertow/server/protocol/ajp/SecurityActions.java
+new file mode 100644
+index 0000000000..962ccd028e
+--- /dev/null
++++ b/core/src/main/java/io/undertow/server/protocol/ajp/SecurityActions.java
+@@ -0,0 +1,44 @@
++/*
++ * JBoss, Home of Professional Open Source.
++ * Copyright 2020 Red Hat, Inc., and individual contributors
++ * as indicated by the @author tags.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ *  Unless required by applicable law or agreed to in writing, software
++ *  distributed under the License is distributed on an "AS IS" BASIS,
++ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ *  See the License for the specific language governing permissions and
++ *  limitations under the License.
++ */
++package io.undertow.server.protocol.ajp;
++
++import static java.lang.System.getProperty;
++import static java.lang.System.getSecurityManager;
++import static java.security.AccessController.doPrivileged;
++
++import java.security.PrivilegedAction;
++
++/**
++ * Security actions to access system environment information.  No methods in
++ * this class are to be made public under any circumstances!
++ */
++final class SecurityActions {
++
++    private SecurityActions() {
++        // forbidden inheritance
++    }
++
++    static String getSystemProperty(final String key) {
++        return getSecurityManager() == null ? getProperty(key) : doPrivileged(new PrivilegedAction<String>() {
++            @Override
++            public String run() {
++                return getProperty(key);
++            }
++        });
++    }
++}

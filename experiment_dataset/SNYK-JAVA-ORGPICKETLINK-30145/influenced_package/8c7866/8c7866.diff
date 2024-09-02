@@ -1,0 +1,59 @@
+diff --git a/modules/common/src/main/java/org/picketlink/common/DefaultPicketLinkLogger.java b/modules/common/src/main/java/org/picketlink/common/DefaultPicketLinkLogger.java
+index 69acd35bf..e89d12749 100644
+--- a/modules/common/src/main/java/org/picketlink/common/DefaultPicketLinkLogger.java
++++ b/modules/common/src/main/java/org/picketlink/common/DefaultPicketLinkLogger.java
+@@ -2374,4 +2374,9 @@ public RuntimeException cannotSetMaxPoolSizeToNegative(String max) {
+         return new RuntimeException("Cannot set maximum STS client pool size to negative number (" + max + ")");
+     }
+ 
++    @Override
++    public RuntimeException parserFeatureNotSupported(String feature) {
++        return new RuntimeException("Parser feature " + feature + " not supported.");
++    }
++
+ }
+diff --git a/modules/common/src/main/java/org/picketlink/common/PicketLinkLogger.java b/modules/common/src/main/java/org/picketlink/common/PicketLinkLogger.java
+index 1c8fe6f78..76b82d1c8 100644
+--- a/modules/common/src/main/java/org/picketlink/common/PicketLinkLogger.java
++++ b/modules/common/src/main/java/org/picketlink/common/PicketLinkLogger.java
+@@ -1215,4 +1215,6 @@ public interface PicketLinkLogger {
+ 
+     RuntimeException cannotSetMaxPoolSizeToNegative(String max);
+ 
++    RuntimeException parserFeatureNotSupported(String feature);
++
+ }
+\ No newline at end of file
+diff --git a/modules/common/src/main/java/org/picketlink/common/util/DocumentUtil.java b/modules/common/src/main/java/org/picketlink/common/util/DocumentUtil.java
+index 9076af1f9..8d5838d14 100644
+--- a/modules/common/src/main/java/org/picketlink/common/util/DocumentUtil.java
++++ b/modules/common/src/main/java/org/picketlink/common/util/DocumentUtil.java
+@@ -66,6 +66,10 @@ public class DocumentUtil {
+ 
+     private static DocumentBuilderFactory documentBuilderFactory;
+ 
++    public static final String feature_external_general_entities = "http://xml.org/sax/features/external-general-entities";
++    public static final String feature_external_parameter_entities = "http://xml.org/sax/features/external-parameter-entities";
++    public static final String feature_disallow_doctype_decl = "http://apache.org/xml/features/disallow-doctype-decl";
++
+     /**
+      * Check whether a node belongs to a document
+      *
+@@ -517,6 +521,17 @@ private static DocumentBuilderFactory getDocumentBuilderFactory() {
+                 documentBuilderFactory = DocumentBuilderFactory.newInstance();
+                 documentBuilderFactory.setNamespaceAware(true);
+                 documentBuilderFactory.setXIncludeAware(true);
++                String feature = "";
++                try {
++                    feature = feature_disallow_doctype_decl;
++                    documentBuilderFactory.setFeature(feature, true);
++                    feature = feature_external_general_entities;
++                    documentBuilderFactory.setFeature(feature, false);
++                    feature = feature_external_parameter_entities;
++                    documentBuilderFactory.setFeature(feature, false);
++                } catch (ParserConfigurationException e) {
++                    throw logger.parserFeatureNotSupported(feature);
++                }
+             } finally {
+                 if (tccl_jaxp) {
+                     SecurityActions.setTCCL(prevTCCL);

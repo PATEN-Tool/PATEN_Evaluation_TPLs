@@ -1,0 +1,31 @@
+diff --git a/java/org/apache/catalina/security/SecurityClassLoad.java b/java/org/apache/catalina/security/SecurityClassLoad.java
+index 37bac621b3e..bd2c4b53dba 100644
+--- a/java/org/apache/catalina/security/SecurityClassLoad.java
++++ b/java/org/apache/catalina/security/SecurityClassLoad.java
+@@ -39,6 +39,7 @@ public static void securityClassLoad(ClassLoader loader)
+         loadCoyotePackage(loader);
+         loadLoaderPackage(loader);
+         loadRealmPackage(loader);
++        loadServletsPackage(loader);
+         loadSessionPackage(loader);
+         loadUtilPackage(loader);
+         loadValvesPackage(loader);
+@@ -122,6 +123,18 @@ private static final void loadRealmPackage(ClassLoader loader)
+     }
+ 
+ 
++    private static final void loadServletsPackage(ClassLoader loader)
++            throws Exception {
++        final String basePackage = "org.apache.catalina.servlets.";
++        // Avoid a possible memory leak in the DefaultServlet when running with
++        // a security manager. The DefaultServlet needs to load an XML parser
++        // when running under a security manager. We want this to be loaded by
++        // the container rather than a web application to prevent a memory leak
++        // via web application class loader.
++        loader.loadClass(basePackage + "DefaultServlet");
++    }
++
++
+     private static final void loadSessionPackage(ClassLoader loader)
+         throws Exception {
+         final String basePackage = "org.apache.catalina.session.";

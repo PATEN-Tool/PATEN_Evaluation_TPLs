@@ -1,0 +1,84 @@
+diff --git a/RELEASE_NOTES.txt b/RELEASE_NOTES.txt
+index b2a63b355f..c37f2117d0 100644
+--- a/RELEASE_NOTES.txt
++++ b/RELEASE_NOTES.txt
+@@ -1,7 +1,10 @@
+-Changes since 4.2.1 
++Changes in trunk
+ -------------------
+ 
+-* [HTTPCLIENT-1248]: Default and lax redirect strategies should not convert requests redirected 
++* [HTTPCLIENT-1255] AbstractVerifier incorrectly parses certificate CN containing wildcard
++  Contributed by Oleg Kalnichevski <olegk at apache.org>
++
++* [HTTPCLIENT-1248] Default and lax redirect strategies should not convert requests redirected
+   with 307 status to GET method.  
+   Contributed by Oleg Kalnichevski <olegk at apache.org>
+ 
+diff --git a/httpclient/src/main/java/org/apache/http/conn/ssl/AbstractVerifier.java b/httpclient/src/main/java/org/apache/http/conn/ssl/AbstractVerifier.java
+index 79a6a6c64d..43b474ed37 100644
+--- a/httpclient/src/main/java/org/apache/http/conn/ssl/AbstractVerifier.java
++++ b/httpclient/src/main/java/org/apache/http/conn/ssl/AbstractVerifier.java
+@@ -43,8 +43,6 @@
+ import java.util.List;
+ import java.util.Locale;
+ import java.util.StringTokenizer;
+-import java.util.logging.Logger;
+-import java.util.logging.Level;
+ 
+ import javax.net.ssl.SSLException;
+ import javax.net.ssl.SSLSession;
+@@ -204,9 +202,10 @@ public final void verify(final String host, final String[] cns,
+                                  !isIPAddress(host);
+ 
+             if(doWildcard) {
+-                if (parts[0].length() > 1) { // e.g. server*
+-                    String prefix = parts[0].substring(0, parts.length-2); // e.g. server
+-                    String suffix = cn.substring(parts[0].length()); // skip wildcard part from cn
++                String firstpart = parts[0];
++                if (firstpart.length() > 1) { // e.g. server*
++                    String prefix = firstpart.substring(0, firstpart.length() - 1); // e.g. server
++                    String suffix = cn.substring(firstpart.length()); // skip wildcard part from cn
+                     String hostSuffix = hostName.substring(prefix.length()); // skip wildcard part from host
+                     match = hostName.startsWith(prefix) && hostSuffix.endsWith(suffix);
+                 } else {
+@@ -302,8 +301,6 @@ private static String[] getSubjectAlts(
+             c = cert.getSubjectAlternativeNames();
+         }
+         catch(CertificateParsingException cpe) {
+-            Logger.getLogger(AbstractVerifier.class.getName())
+-                    .log(Level.FINE, "Error parsing certificate.", cpe);
+         }
+         if(c != null) {
+             for (List<?> aC : c) {
+diff --git a/httpclient/src/test/java/org/apache/http/conn/ssl/TestHostnameVerifier.java b/httpclient/src/test/java/org/apache/http/conn/ssl/TestHostnameVerifier.java
+index db8daa70d7..2cc80e803b 100644
+--- a/httpclient/src/test/java/org/apache/http/conn/ssl/TestHostnameVerifier.java
++++ b/httpclient/src/test/java/org/apache/http/conn/ssl/TestHostnameVerifier.java
+@@ -300,7 +300,7 @@ public void testMatching() {
+     }
+ 
+     @Test
+-    public void HTTPCLIENT_1097() {
++    public void testHTTPCLIENT_1097() {
+         String cns[];
+         String alt[] = {};
+         X509HostnameVerifier bhv = new BrowserCompatHostnameVerifier();
+@@ -318,6 +318,17 @@ public void HTTPCLIENT_1097() {
+         checkWildcard("s*.gouv.uk", false); // 2 character TLD, invalid 2TLD
+     }
+ 
++    @Test
++    public void testHTTPCLIENT_1255() {
++        X509HostnameVerifier bhv = new BrowserCompatHostnameVerifier();
++        X509HostnameVerifier shv = new StrictHostnameVerifier();
++
++        String cns[] = new String []{"m*.a.b.c.com"}; // component part
++        String alt[] = {};
++        checkMatching(bhv, "mail.a.b.c.com", cns, alt, false); // OK
++        checkMatching(shv, "mail.a.b.c.com", cns, alt, false); // OK
++    }
++
+     // Helper
+     private void checkWildcard(String host, boolean isOK) {
+         Assert.assertTrue(host+" should be "+isOK, isOK==AbstractVerifier.acceptableCountryWildcard(host));

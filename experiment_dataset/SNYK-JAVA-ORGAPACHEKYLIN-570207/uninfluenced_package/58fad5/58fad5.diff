@@ -1,0 +1,98 @@
+diff --git a/core-common/src/main/java/org/apache/kylin/common/util/CliCommandExecutor.java b/core-common/src/main/java/org/apache/kylin/common/util/CliCommandExecutor.java
+index eda3c5eb814..c7600fd3bed 100644
+--- a/core-common/src/main/java/org/apache/kylin/common/util/CliCommandExecutor.java
++++ b/core-common/src/main/java/org/apache/kylin/common/util/CliCommandExecutor.java
+@@ -164,6 +164,7 @@ private Pair<Integer, String> runNativeCommand(String command, Logger logAppende
+     }
+ 
+     public static final String COMMAND_INJECT_REX = "[ &`>|{}()$;\\-#~!+*”\\\\]+";
++    public static final String COMMAND_WHITE_LIST = "[^\\w%,@/:=?.\"\\[\\]]";
+ 
+     /**
+      * <pre>
+@@ -187,9 +188,17 @@ private Pair<Integer, String> runNativeCommand(String command, Logger logAppende
+      * </pre>
+      */
+     public static String checkParameter(String commandParameter) {
+-        String repaired = commandParameter.replaceAll(COMMAND_INJECT_REX, "");
++        return checkParameter(commandParameter, COMMAND_INJECT_REX);
++    }
++
++    public static String checkParameterWhiteList(String commandParameter) {
++        return checkParameter(commandParameter, COMMAND_WHITE_LIST);
++    }
++
++    private static String checkParameter(String commandParameter, String rex) {
++        String repaired = commandParameter.replaceAll(rex, "");
+         if (repaired.length() != commandParameter.length()) {
+-            logger.info("Detected illegal character in command {}, replace it to {}.", commandParameter, repaired);
++            logger.info("Detected illegal character in command {} by {} , replace it to {}.", commandParameter, rex, repaired);
+         }
+         return repaired;
+     }
+diff --git a/core-common/src/test/java/org/apache/kylin/common/util/CliCommandExecutorTest.java b/core-common/src/test/java/org/apache/kylin/common/util/CliCommandExecutorTest.java
+index b088e02570c..043e4b59213 100644
+--- a/core-common/src/test/java/org/apache/kylin/common/util/CliCommandExecutorTest.java
++++ b/core-common/src/test/java/org/apache/kylin/common/util/CliCommandExecutorTest.java
+@@ -23,20 +23,29 @@
+ 
+ public class CliCommandExecutorTest {
+ 
++    private String[][] commands = {
++            {"nslookup unknown.com &", "nslookupunknown.com"},
++            {"cat `whoami`", "catwhoami"},
++            {"echo \"kylin@headnode:/home/kylin/lib/job.jar?key=Value123\",", "echo\"kylin@headnode:/home/kylin/lib/job.jar?key=Value123\","},
++            {"whoami > /var/www/static/whoami.txt", "whoami/var/www/static/whoami.txt"},
++            {"mysql_test@jdbc,url=jdbc:mysql://localhost:3306/kylin,username=kylin_test,password=bUmSqT/opyqz89Geu0yQ3g==,maxActive=10,maxIdle=10,passwordEncrypted=true", "mysql_test@jdbc,url=jdbc:mysql://localhost:3306/kylin,username=kylin_test,password=bUmSqT/opyqz89Geu0yQ3g==,maxActive=10,maxIdle=10,passwordEncrypted=true"},
++            {"c1 || c2# || c3 || *c4\\", "c1c2c3c4"},
++            {"c1 &&", "c1"},
++            {"c1 + > c2 [p1]%", "c1c2[p1]%"},
++            {"c1 | ${c2}", "c1c2"},
++    };
++
+     @Test
+     public void testCmd() {
+-        String[][] commands = {
+-                {"nslookup unknown.com &", "nslookupunknown.com"},
+-                {"cat `whoami`", "catwhoami"},
+-                {"whoami > /var/www/static/whoami.txt", "whoami/var/www/static/whoami.txt"},
+-                {"c1 || c2# || c3 || *c4\\", "c1c2c3c4"},
+-                {"c1 &&", "c1"},
+-                {"c1 + > c2 [p1]%", "c1c2[p1]%"},
+-                {"c1 | ${c2}", "c1c2"},
+-        };
+-
+         for (String[] pair : commands) {
+             assertEquals(pair[1], CliCommandExecutor.checkParameter(pair[0]));
+         }
+     }
++
++    @Test
++    public void testCmd2() {
++        for (String[] pair : commands) {
++            assertEquals(pair[1], CliCommandExecutor.checkParameterWhiteList(pair[0]));
++        }
++    }
+ }
+diff --git a/server-base/src/main/java/org/apache/kylin/rest/service/CubeService.java b/server-base/src/main/java/org/apache/kylin/rest/service/CubeService.java
+index 3f716c9417c..f898628ea09 100644
+--- a/server-base/src/main/java/org/apache/kylin/rest/service/CubeService.java
++++ b/server-base/src/main/java/org/apache/kylin/rest/service/CubeService.java
+@@ -1103,8 +1103,15 @@ public void migrateCube(CubeInstance cube, String projectName) {
+                 "Destination configuration should not be empty.");
+ 
+         String stringBuilder = ("%s/bin/kylin.sh org.apache.kylin.tool.CubeMigrationCLI %s %s %s %s %s %s true true");
+-        String cmd = String.format(Locale.ROOT, stringBuilder, KylinConfig.getKylinHome(), srcCfgUri, dstCfgUri,
+-                cube.getName(), projectName, config.isAutoMigrateCubeCopyAcl(), config.isAutoMigrateCubePurge());
++        String cmd = String.format(Locale.ROOT,
++                stringBuilder,
++                KylinConfig.getKylinHome(),
++                CliCommandExecutor.checkParameterWhiteList(srcCfgUri),
++                CliCommandExecutor.checkParameterWhiteList(dstCfgUri),
++                cube.getName(),
++                CliCommandExecutor.checkParameterWhiteList(projectName),
++                config.isAutoMigrateCubeCopyAcl(),
++                config.isAutoMigrateCubePurge());
+ 
+         logger.info("One click migration cmd: " + cmd);
+ 

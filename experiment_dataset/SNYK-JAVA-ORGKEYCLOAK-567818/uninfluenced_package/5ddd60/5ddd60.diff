@@ -1,0 +1,493 @@
+diff --git a/model/jpa/src/main/java/org/keycloak/models/jpa/JpaUserCredentialStore.java b/model/jpa/src/main/java/org/keycloak/models/jpa/JpaUserCredentialStore.java
+index c7ff27ae9621..07b6bad27d4b 100644
+--- a/model/jpa/src/main/java/org/keycloak/models/jpa/JpaUserCredentialStore.java
++++ b/model/jpa/src/main/java/org/keycloak/models/jpa/JpaUserCredentialStore.java
+@@ -57,7 +57,7 @@ public JpaUserCredentialStore(KeycloakSession session, EntityManager em) {
+     @Override
+     public void updateCredential(RealmModel realm, UserModel user, CredentialModel cred) {
+         CredentialEntity entity = em.find(CredentialEntity.class, cred.getId());
+-        if (entity == null) return;
++        if (!checkCredentialEntity(entity, user)) return;
+         entity.setCreatedDate(cred.getCreatedDate());
+         entity.setUserLabel(cred.getUserLabel());
+         entity.setType(cred.getType());
+@@ -80,7 +80,7 @@ public boolean removeStoredCredential(RealmModel realm, UserModel user, String i
+     @Override
+     public CredentialModel getStoredCredentialById(RealmModel realm, UserModel user, String id) {
+         CredentialEntity entity = em.find(CredentialEntity.class, id);
+-        if (entity == null) return null;
++        if (!checkCredentialEntity(entity, user)) return null;
+         CredentialModel model = toModel(entity);
+         return model;
+     }
+@@ -161,7 +161,7 @@ CredentialEntity createCredentialEntity(RealmModel realm, UserModel user, Creden
+ 
+     CredentialEntity removeCredentialEntity(RealmModel realm, UserModel user, String id) {
+         CredentialEntity entity = em.find(CredentialEntity.class, id, LockModeType.PESSIMISTIC_WRITE);
+-        if (entity == null) return null;
++        if (!checkCredentialEntity(entity, user)) return null;
+ 
+         int currentPriority = entity.getPriority();
+ 
+@@ -234,4 +234,8 @@ public boolean moveCredentialTo(RealmModel realm, UserModel user, String id, Str
+         return true;
+     }
+ 
++    private boolean checkCredentialEntity(CredentialEntity entity, UserModel user) {
++        return entity != null && entity.getUser() != null && entity.getUser().getId().equals(user.getId());
++    }
++
+ }
+diff --git a/model/jpa/src/main/java/org/keycloak/storage/jpa/JpaUserFederatedStorageProvider.java b/model/jpa/src/main/java/org/keycloak/storage/jpa/JpaUserFederatedStorageProvider.java
+index 5fa644f3f7dc..9ba0e34a29c0 100644
+--- a/model/jpa/src/main/java/org/keycloak/storage/jpa/JpaUserFederatedStorageProvider.java
++++ b/model/jpa/src/main/java/org/keycloak/storage/jpa/JpaUserFederatedStorageProvider.java
+@@ -568,7 +568,7 @@ public void deleteRoleMapping(RealmModel realm, String userId, RoleModel role) {
+     @Override
+     public void updateCredential(RealmModel realm, String userId, CredentialModel cred) {
+         FederatedUserCredentialEntity entity = em.find(FederatedUserCredentialEntity.class, cred.getId());
+-        if (entity == null) return;
++        if (!checkCredentialEntity(entity, userId)) return;
+         createIndex(realm, userId);
+         entity.setCreatedDate(cred.getCreatedDate());
+         entity.setType(cred.getType());
+@@ -605,7 +605,7 @@ public CredentialModel createCredential(RealmModel realm, String userId, Credent
+     @Override
+     public boolean removeStoredCredential(RealmModel realm, String userId, String id) {
+         FederatedUserCredentialEntity entity = em.find(FederatedUserCredentialEntity.class, id, LockModeType.PESSIMISTIC_WRITE);
+-        if (entity == null) return false;
++        if (!checkCredentialEntity(entity, userId)) return false;
+ 
+         int currentPriority = entity.getPriority();
+ 
+@@ -625,11 +625,15 @@ public boolean removeStoredCredential(RealmModel realm, String userId, String id
+     @Override
+     public CredentialModel getStoredCredentialById(RealmModel realm, String userId, String id) {
+         FederatedUserCredentialEntity entity = em.find(FederatedUserCredentialEntity.class, id);
+-        if (entity == null) return null;
++        if (!checkCredentialEntity(entity, userId)) return null;
+         CredentialModel model = toModel(entity);
+         return model;
+     }
+ 
++    private boolean checkCredentialEntity(FederatedUserCredentialEntity entity, String userId) {
++        return entity != null && entity.getUserId() != null && entity.getUserId().equals(userId);
++    }
++
+     protected CredentialModel toModel(FederatedUserCredentialEntity entity) {
+         CredentialModel model = new CredentialModel();
+         model.setId(entity.getId());
+diff --git a/services/src/main/java/org/keycloak/services/resources/account/AccountCredentialResource.java b/services/src/main/java/org/keycloak/services/resources/account/AccountCredentialResource.java
+index 55f62d09e9f4..47c8959b2286 100644
+--- a/services/src/main/java/org/keycloak/services/resources/account/AccountCredentialResource.java
++++ b/services/src/main/java/org/keycloak/services/resources/account/AccountCredentialResource.java
+@@ -1,6 +1,7 @@
+ package org.keycloak.services.resources.account;
+ 
+ import com.fasterxml.jackson.annotation.JsonIgnore;
++import org.jboss.logging.Logger;
+ import org.jboss.resteasy.annotations.cache.NoCache;
+ import org.keycloak.authentication.Authenticator;
+ import org.keycloak.authentication.AuthenticatorFactory;
+@@ -17,13 +18,16 @@
+ import org.keycloak.models.utils.ModelToRepresentation;
+ import org.keycloak.representations.idm.CredentialRepresentation;
+ import org.keycloak.services.ErrorResponse;
++import org.keycloak.services.ErrorResponseException;
+ import org.keycloak.services.managers.Auth;
+ import org.keycloak.services.messages.Messages;
++import org.keycloak.util.JsonSerialization;
+ import org.keycloak.utils.MediaType;
+ 
+ import javax.ws.rs.Consumes;
+ import javax.ws.rs.DELETE;
+ import javax.ws.rs.GET;
++import javax.ws.rs.NotFoundException;
+ import javax.ws.rs.POST;
+ import javax.ws.rs.PUT;
+ import javax.ws.rs.Path;
+@@ -45,6 +49,8 @@
+ 
+ public class AccountCredentialResource {
+ 
++    private static final Logger logger = Logger.getLogger(AccountCredentialResource.class);
++
+     public static final String TYPE = "type";
+     public static final String ENABLED_ONLY = "enabled-only";
+     public static final String USER_CREDENTIALS = "user-credentials";
+@@ -279,6 +285,10 @@ private boolean isFlowEffectivelyDisabled(AuthenticationFlowModel flow) {
+     @NoCache
+     public void removeCredential(final @PathParam("credentialId") String credentialId) {
+         auth.require(AccountRoles.MANAGE_ACCOUNT);
++        CredentialModel credential = session.userCredentialManager().getStoredCredentialById(realm, user, credentialId);
++        if (credential == null) {
++            throw new NotFoundException("Credential not found");
++        }
+         session.userCredentialManager().removeStoredCredential(realm, user, credentialId);
+     }
+ 
+@@ -287,14 +297,25 @@ public void removeCredential(final @PathParam("credentialId") String credentialI
+      * Update a user label of specified credential of current user
+      *
+      * @param credentialId ID of the credential, which will be updated
+-     * @param userLabel new user label
++     * @param userLabel new user label as JSON string
+      */
+     @PUT
+-    @Consumes(javax.ws.rs.core.MediaType.TEXT_PLAIN)
++    @Consumes(MediaType.APPLICATION_JSON)
+     @Path("{credentialId}/label")
++    @NoCache
+     public void setLabel(final @PathParam("credentialId") String credentialId, String userLabel) {
+         auth.require(AccountRoles.MANAGE_ACCOUNT);
+-        session.userCredentialManager().updateCredentialLabel(realm, user, credentialId, userLabel);
++        CredentialModel credential = session.userCredentialManager().getStoredCredentialById(realm, user, credentialId);
++        if (credential == null) {
++            throw new NotFoundException("Credential not found");
++        }
++
++        try {
++            String label = JsonSerialization.readValue(userLabel, String.class);
++            session.userCredentialManager().updateCredentialLabel(realm, user, credentialId, label);
++        } catch (IOException ioe) {
++            throw new ErrorResponseException(ErrorResponse.error(Messages.INVALID_REQUEST, Response.Status.BAD_REQUEST));
++        }
+     }
+ 
+     // TODO: This is kept here for now and commented.
+diff --git a/services/src/main/java/org/keycloak/services/resources/admin/UserResource.java b/services/src/main/java/org/keycloak/services/resources/admin/UserResource.java
+index 724c3e4c8bb7..464702f03c5d 100755
+--- a/services/src/main/java/org/keycloak/services/resources/admin/UserResource.java
++++ b/services/src/main/java/org/keycloak/services/resources/admin/UserResource.java
+@@ -662,6 +662,12 @@ public List<String> getConfiguredUserStorageCredentialTypes() {
+     @NoCache
+     public void removeCredential(final @PathParam("credentialId") String credentialId) {
+         auth.users().requireManage(user);
++        CredentialModel credential = session.userCredentialManager().getStoredCredentialById(realm, user, credentialId);
++        if (credential == null) {
++            // we do this to make sure somebody can't phish ids
++            if (auth.users().canQuery()) throw new NotFoundException("Credential not found");
++            else throw new ForbiddenException();
++        }
+         session.userCredentialManager().removeStoredCredential(realm, user, credentialId);
+         adminEvent.operation(OperationType.ACTION).resourcePath(session.getContext().getUri()).success();
+     }
+@@ -677,7 +683,7 @@ public void setCredentialUserLabel(final @PathParam("credentialId") String crede
+         CredentialModel credential = session.userCredentialManager().getStoredCredentialById(realm, user, credentialId);
+         if (credential == null) {
+             // we do this to make sure somebody can't phish ids
+-            if (auth.users().canQuery()) throw new NotFoundException("User not found");
++            if (auth.users().canQuery()) throw new NotFoundException("Credential not found");
+             else throw new ForbiddenException();
+         }
+         session.userCredentialManager().updateCredentialLabel(realm, user, credentialId, userLabel);
+@@ -705,7 +711,7 @@ public void moveCredentialAfter(final @PathParam("credentialId") String credenti
+         CredentialModel credential = session.userCredentialManager().getStoredCredentialById(realm, user, credentialId);
+         if (credential == null) {
+             // we do this to make sure somebody can't phish ids
+-            if (auth.users().canQuery()) throw new NotFoundException("User not found");
++            if (auth.users().canQuery()) throw new NotFoundException("Credential not found");
+             else throw new ForbiddenException();
+         }
+         session.userCredentialManager().moveCredentialTo(realm, user, credentialId, newPreviousCredentialId);
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/account/AccountFormServiceTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/account/AccountFormServiceTest.java
+index db270942a783..9c7985acc93c 100755
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/account/AccountFormServiceTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/account/AccountFormServiceTest.java
+@@ -23,6 +23,7 @@
+ import org.junit.Rule;
+ import org.junit.Test;
+ import org.keycloak.admin.client.resource.RealmResource;
++import org.keycloak.admin.client.resource.UserResource;
+ import org.keycloak.credential.CredentialModel;
+ import org.keycloak.events.Details;
+ import org.keycloak.events.Errors;
+@@ -33,8 +34,10 @@
+ import org.keycloak.models.PasswordPolicy;
+ import org.keycloak.models.RealmModel;
+ import org.keycloak.models.UserModel;
++import org.keycloak.models.credential.OTPCredentialModel;
+ import org.keycloak.models.utils.TimeBasedOTP;
+ import org.keycloak.representations.idm.ClientRepresentation;
++import org.keycloak.representations.idm.CredentialRepresentation;
+ import org.keycloak.representations.idm.EventRepresentation;
+ import org.keycloak.representations.idm.RealmRepresentation;
+ import org.keycloak.representations.idm.UserRepresentation;
+@@ -63,6 +66,7 @@
+ import org.keycloak.testsuite.util.OAuthClient;
+ import org.keycloak.testsuite.util.RealmBuilder;
+ import org.keycloak.testsuite.util.UIUtils;
++import org.keycloak.testsuite.util.URLUtils;
+ import org.keycloak.testsuite.util.UserBuilder;
+ import java.util.Collections;
+ import org.openqa.selenium.By;
+@@ -992,6 +996,47 @@ public void setupTotp() {
+         assertFalse(errorPage.isCurrent());
+     }
+ 
++
++    @Test
++    public void removeTotpAsDifferentUser() {
++        UserResource user1 = ApiUtil.findUserByUsernameId(testRealm(), "user-with-one-configured-otp");
++        CredentialRepresentation otpCredential = user1.credentials().stream()
++                .filter(credentialRep -> OTPCredentialModel.TYPE.equals(credentialRep.getType()))
++                .findFirst()
++                .get();
++
++        // Login as evil user (test-user@localhost) and setup TOTP
++        totpPage.open();
++        loginPage.login("test-user@localhost", "password");
++        Assert.assertTrue(totpPage.isCurrent());
++
++        totpPageSetup();
++
++        totpPage.configure(totp.generateTOTP(totpPage.getTotpSecret()));
++
++        Assert.assertEquals("Mobile authenticator configured.", profilePage.getSuccess());
++
++        String currentStateChecker = driver.findElement(By.id("stateChecker")).getAttribute("value");
++
++
++        // Try to delete TOTP of "user-with-one-configured-otp" by replace ID of the TOTP credential in the request
++        String currentURL = driver.getCurrentUrl();
++
++        String formParameters = "stateChecker=" + currentStateChecker
++                + "&submitAction=Delete"
++                + "&credentialId=" + otpCredential.getId();
++
++        URLUtils.sendPOSTRequestWithWebDriver(currentURL, formParameters);
++
++        // Assert credential of "user-with-one-configured-otp" was NOT deleted and is still present for the user
++        Assert.assertTrue(user1.credentials().stream()
++                .anyMatch(credentialRepresentation -> credentialRepresentation.getType().equals(OTPCredentialModel.TYPE)));
++
++        // Remove TOTP for "test-user" and logout
++        totpPage.removeTotp();
++        totpPage.logout();
++    }
++
+     @Test
+     public void changeProfileNoAccess() throws Exception {
+         profilePage.open();
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/account/AccountRestServiceTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/account/AccountRestServiceTest.java
+index 0bd1bdc0ee4e..425b4d0cf4c9 100755
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/account/AccountRestServiceTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/account/AccountRestServiceTest.java
+@@ -27,6 +27,7 @@
+ import org.keycloak.authentication.requiredactions.WebAuthnRegisterFactory;
+ import org.keycloak.broker.provider.util.SimpleHttp;
+ import org.keycloak.common.Profile;
++import org.keycloak.common.util.ObjectUtil;
+ import org.keycloak.credential.CredentialTypeMetadata;
+ import org.keycloak.events.EventType;
+ import org.keycloak.models.AuthenticationExecutionModel;
+@@ -394,6 +395,40 @@ public void testCredentialsGet() throws IOException {
+         Assert.assertNull(password.getUserCredentials());
+     }
+ 
++
++    @Test
++    public void testCRUDCredentialOfDifferentUser() throws IOException {
++        // Get credential ID of the OTP credential of the different user thant currently logged user
++        UserResource user = ApiUtil.findUserByUsernameId(testRealm(), "user-with-one-configured-otp");
++        CredentialRepresentation otpCredential = user.credentials().stream()
++                .filter(credentialRep -> OTPCredentialModel.TYPE.equals(credentialRep.getType()))
++                .findFirst()
++                .get();
++
++        // Test that current user can't update the credential, which belongs to the different user
++        SimpleHttp.Response response = SimpleHttp
++                .doPut(getAccountUrl("credentials/" + otpCredential.getId() + "/label"), httpClient)
++                .auth(tokenUtil.getToken())
++                .json("new-label")
++                .asResponse();
++        assertEquals(404, response.getStatus());
++
++        // Test that current user can't delete the credential, which belongs to the different user
++        response = SimpleHttp
++                .doDelete(getAccountUrl("credentials/" + otpCredential.getId()), httpClient)
++                .acceptJson()
++                .auth(tokenUtil.getToken())
++                .asResponse();
++        assertEquals(404, response.getStatus());
++
++        // Assert credential was not updated or removed
++        CredentialRepresentation otpCredentialLoaded = user.credentials().stream()
++                .filter(credentialRep -> OTPCredentialModel.TYPE.equals(credentialRep.getType()))
++                .findFirst()
++                .get();
++        Assert.assertTrue(ObjectUtil.isEqualOrBothNull(otpCredential.getUserLabel(), otpCredentialLoaded.getUserLabel()));
++    }
++
+     // Send REST request to get all credential containers and credentials of current user
+     private List<AccountCredentialResource.CredentialContainer> getCredentials() throws IOException {
+         return SimpleHttp.doGet(getAccountUrl("credentials"), httpClient)
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java
+index 254ca8084578..686fa7f1e406 100755
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/admin/UserTest.java
+@@ -32,14 +32,17 @@
+ import org.keycloak.admin.client.resource.RoleMappingResource;
+ import org.keycloak.admin.client.resource.UserResource;
+ import org.keycloak.admin.client.resource.UsersResource;
++import org.keycloak.broker.provider.util.SimpleHttp;
+ import org.keycloak.common.VerificationException;
+ import org.keycloak.common.util.Base64;
++import org.keycloak.common.util.ObjectUtil;
+ import org.keycloak.credential.CredentialModel;
+ import org.keycloak.events.admin.OperationType;
+ import org.keycloak.events.admin.ResourceType;
+ import org.keycloak.models.Constants;
+ import org.keycloak.models.PasswordPolicy;
+ import org.keycloak.models.UserModel;
++import org.keycloak.models.credential.OTPCredentialModel;
+ import org.keycloak.models.credential.PasswordCredentialModel;
+ import org.keycloak.models.utils.ModelToRepresentation;
+ import org.keycloak.representations.AccessToken;
+@@ -1958,6 +1961,47 @@ public void testDeleteCredentials() {
+         user.resetPassword(credPasswd);
+         Assert.assertEquals(1, user.credentials().size());
+     }
++
++    @Test
++    public void testCRUDCredentialsOfDifferentUser() {
++        // Get credential ID of the OTP credential of the user1
++        UserResource user1 = ApiUtil.findUserByUsernameId(testRealm(), "user-with-one-configured-otp");
++        CredentialRepresentation otpCredential = user1.credentials().stream()
++                .filter(credentialRep -> OTPCredentialModel.TYPE.equals(credentialRep.getType()))
++                .findFirst()
++                .get();
++
++        // Test that when admin operates on user "user2", he can't update, move or remove credentials of different user "user1"
++        UserResource user2 = ApiUtil.findUserByUsernameId(testRealm(), "test-user@localhost");
++        try {
++            user2.setCredentialUserLabel(otpCredential.getId(), "new-label");
++            Assert.fail("Not expected to successfully update user label");
++        } catch (NotFoundException nfe) {
++            // Expected
++        }
++
++        try {
++            user2.moveCredentialToFirst(otpCredential.getId());
++            Assert.fail("Not expected to successfully move credential");
++        } catch (NotFoundException nfe) {
++            // Expected
++        }
++
++        try {
++            user2.removeCredential(otpCredential.getId());
++            Assert.fail("Not expected to successfully remove credential");
++        } catch (NotFoundException nfe) {
++            // Expected
++        }
++
++        // Assert credential was not removed or updated
++        CredentialRepresentation otpCredentialLoaded = user1.credentials().stream()
++                .filter(credentialRep -> OTPCredentialModel.TYPE.equals(credentialRep.getType()))
++                .findFirst()
++                .get();
++        Assert.assertTrue(ObjectUtil.isEqualOrBothNull(otpCredential.getUserLabel(), otpCredentialLoaded.getUserLabel()));
++        Assert.assertTrue(ObjectUtil.isEqualOrBothNull(otpCredential.getPriority(), otpCredentialLoaded.getPriority()));
++    }
+     
+     @Test
+     public void testGetGroupsForUserFullRepresentation() {
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/federation/storage/UserStorageTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/federation/storage/UserStorageTest.java
+index 3ac850a9591c..1ad694546550 100644
+--- a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/federation/storage/UserStorageTest.java
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/federation/storage/UserStorageTest.java
+@@ -11,6 +11,7 @@
+ import org.keycloak.admin.client.resource.RealmResource;
+ import org.keycloak.admin.client.resource.UserResource;
+ import org.keycloak.common.util.MultivaluedHashMap;
++import org.keycloak.common.util.ObjectUtil;
+ import org.keycloak.credential.CredentialAuthentication;
+ import org.keycloak.credential.CredentialModel;
+ import org.keycloak.credential.UserCredentialStoreManager;
+@@ -22,6 +23,7 @@
+ import org.keycloak.models.credential.PasswordCredentialModel;
+ import org.keycloak.models.utils.KeycloakModelUtils;
+ import org.keycloak.representations.idm.ComponentRepresentation;
++import org.keycloak.representations.idm.CredentialRepresentation;
+ import org.keycloak.representations.idm.GroupRepresentation;
+ import org.keycloak.representations.idm.RealmRepresentation;
+ import org.keycloak.representations.idm.RoleRepresentation;
+@@ -76,6 +78,8 @@
+ import static org.keycloak.storage.UserStorageProviderModel.MAX_LIFESPAN;
+ import static org.keycloak.testsuite.actions.RequiredActionEmailVerificationTest.getPasswordResetEmailLink;
+ import org.keycloak.testsuite.arquillian.annotation.AuthServerContainerExclude.AuthServer;
++import org.keycloak.testsuite.util.WaitUtils;
++
+ import static org.keycloak.testsuite.util.URLAssert.assertCurrentUrlDoesntStartWith;
+ import static org.keycloak.testsuite.util.URLAssert.assertCurrentUrlStartsWith;
+ 
+@@ -960,6 +964,57 @@ public void testCredentialCRUD(KeycloakSession session) throws Exception {
+         });
+     }
+ 
++    @Test
++    public void testCRUDCredentialsOfDifferentUser() {
++        // Create OTP credential for user1 in the federated storage
++        testingClient.server().run(session -> {
++            RealmModel realm = session.realms().getRealmByName("test");
++
++            UserModel user = session.users().getUserByUsername("thor", realm);
++            Assert.assertFalse(StorageId.isLocalStorage(user));
++
++            CredentialModel otp1 = OTPCredentialModel.createFromPolicy(realm, "secret1");
++            session.userCredentialManager().createCredential(realm, user, otp1);
++        });
++
++        UserResource user1 = ApiUtil.findUserByUsernameId(testRealmResource(), "thor");
++        CredentialRepresentation otpCredential = user1.credentials().stream()
++                .filter(credentialRep -> OTPCredentialModel.TYPE.equals(credentialRep.getType()))
++                .findFirst()
++                .get();
++
++        // Test that when admin operates on user "user2", who is saved in user-storage, he can't update, move or remove credentials of different user "user1"
++        UserResource user2 = ApiUtil.findUserByUsernameId(testRealmResource(), "tbrady");
++        try {
++            user2.setCredentialUserLabel(otpCredential.getId(), "new-label");
++            Assert.fail("Not expected to successfully update user label");
++        } catch (NotFoundException nfe) {
++            // Expected
++        }
++
++        try {
++            user2.moveCredentialToFirst(otpCredential.getId());
++            Assert.fail("Not expected to successfully move credential");
++        } catch (NotFoundException nfe) {
++            // Expected
++        }
++
++        try {
++            user2.removeCredential(otpCredential.getId());
++            Assert.fail("Not expected to successfully remove credential");
++        } catch (NotFoundException nfe) {
++            // Expected
++        }
++
++        // Assert credential was not removed or updated
++        CredentialRepresentation otpCredentialLoaded = user1.credentials().stream()
++                .filter(credentialRep -> OTPCredentialModel.TYPE.equals(credentialRep.getType()))
++                .findFirst()
++                .get();
++        Assert.assertTrue(ObjectUtil.isEqualOrBothNull(otpCredential.getUserLabel(), otpCredentialLoaded.getUserLabel()));
++        Assert.assertTrue(ObjectUtil.isEqualOrBothNull(otpCredential.getPriority(), otpCredentialLoaded.getPriority()));
++    }
++
+ 
+     private void assertOrder(List<CredentialModel> creds, String... expectedIds) {
+         org.keycloak.testsuite.Assert.assertEquals(expectedIds.length, creds.size());
+diff --git a/themes/src/main/resources/theme/keycloak-preview/account/messages/messages_en.properties b/themes/src/main/resources/theme/keycloak-preview/account/messages/messages_en.properties
+index bb2c49b0333b..9a6aae99ae2b 100644
+--- a/themes/src/main/resources/theme/keycloak-preview/account/messages/messages_en.properties
++++ b/themes/src/main/resources/theme/keycloak-preview/account/messages/messages_en.properties
+@@ -78,6 +78,7 @@ webauthn-help-text=Use your security key to log in.
+ webauthn-passwordless-display-name=Security Key
+ webauthn-passwordless-help-text=Use your security key for passwordless log in.
+ basic-authentication=Basic Authentication
++invalidRequestMessage=Invalid Request
+ 
+ # Applications page
+ applicationsPageTitle=Applications

@@ -1,0 +1,40 @@
+diff --git a/pdfbox/src/main/java/org/apache/pdfbox/pdfparser/BaseParser.java b/pdfbox/src/main/java/org/apache/pdfbox/pdfparser/BaseParser.java
+index d5aea888a9a..9990b0b235e 100644
+--- a/pdfbox/src/main/java/org/apache/pdfbox/pdfparser/BaseParser.java
++++ b/pdfbox/src/main/java/org/apache/pdfbox/pdfparser/BaseParser.java
+@@ -285,11 +285,6 @@ private boolean readUntilEndOfCOSDictionary() throws IOException
+     private boolean parseCOSDictionaryNameValuePair(COSDictionary obj) throws IOException
+     {
+         COSName key = parseCOSName();
+-        if (key == null)
+-        {
+-            LOG.warn("Empty COSName at offset " + seqSource.getPosition());
+-            return false;
+-        }
+         COSBase value = parseCOSDictionaryValue();
+         skipSpaces();
+         if (value == null)
+@@ -657,13 +652,18 @@ protected COSArray parseCOSArray() throws IOException
+             else
+             {
+                 //it could be a bad object in the array which is just skipped
+-                LOG.warn("Corrupt object reference at offset " +
+-                        seqSource.getPosition() + ", start offset: " + startPosition);
+-
+-                // This could also be an "endobj" or "endstream" which means we can assume that
+-                // the array has ended.
++                LOG.warn("Corrupt array element at offset "
++                        + seqSource.getPosition() + ", start offset: " + startPosition);
+                 String isThisTheEnd = readString();
++                // return immediately if a corrupt element is followed by another array
++                // to avoid a possible infinite recursion as most likely the whole array is corrupted
++                if (isThisTheEnd.isEmpty() && seqSource.peek() == '[')
++                {
++                    return po;
++                }
+                 seqSource.unread(isThisTheEnd.getBytes(ISO_8859_1));
++                // This could also be an "endobj" or "endstream" which means we can assume that
++                // the array has ended.
+                 if(ENDOBJ_STRING.equals(isThisTheEnd) || ENDSTREAM_STRING.equals(isThisTheEnd))
+                 {
+                     return po;

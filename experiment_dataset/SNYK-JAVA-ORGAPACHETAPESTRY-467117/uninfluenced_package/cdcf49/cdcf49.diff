@@ -1,0 +1,28 @@
+diff --git a/tapestry-core/src/main/java/org/apache/tapestry5/internal/services/ClientDataEncoderImpl.java b/tapestry-core/src/main/java/org/apache/tapestry5/internal/services/ClientDataEncoderImpl.java
+index c98090d143..7a2600995c 100644
+--- a/tapestry-core/src/main/java/org/apache/tapestry5/internal/services/ClientDataEncoderImpl.java
++++ b/tapestry-core/src/main/java/org/apache/tapestry5/internal/services/ClientDataEncoderImpl.java
+@@ -32,6 +32,7 @@
+ import java.io.ObjectInputStream;
+ import java.io.UnsupportedEncodingException;
+ import java.security.Key;
++import java.security.MessageDigest;
+ import java.util.zip.GZIPInputStream;
+ 
+ public class ClientDataEncoderImpl implements ClientDataEncoder
+@@ -126,13 +127,13 @@ private void validateHMAC(String storedHmacResult, Base64InputStream b64in) thro
+ 
+         String actual = macOs.getResult();
+ 
+-        if (!storedHmacResult.equals(actual))
++        if (!MessageDigest.isEqual(storedHmacResult.getBytes(), actual.getBytes()))
+         {
+             throw new IOException("Client data associated with the current request appears to have been tampered with " +
+                     "(the HMAC signature does not match).");
+         }
+     }
+-
++    
+     public ObjectInputStream decodeEncodedClientData(String clientData) throws IOException
+     {
+         return decodeClientData(urlEncoder.decode(clientData));

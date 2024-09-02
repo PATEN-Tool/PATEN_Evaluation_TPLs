@@ -1,0 +1,365 @@
+diff --git a/hibernate-core/src/main/java/org/hibernate/dialect/Dialect.java b/hibernate-core/src/main/java/org/hibernate/dialect/Dialect.java
+index a85f50b337f..4685e15621a 100644
+--- a/hibernate-core/src/main/java/org/hibernate/dialect/Dialect.java
++++ b/hibernate-core/src/main/java/org/hibernate/dialect/Dialect.java
+@@ -84,6 +84,7 @@
+ import org.hibernate.internal.CoreLogging;
+ import org.hibernate.internal.CoreMessageLogger;
+ import org.hibernate.internal.util.ReflectHelper;
++import org.hibernate.internal.util.StringHelper;
+ import org.hibernate.internal.util.collections.ArrayHelper;
+ import org.hibernate.internal.util.io.StreamCopier;
+ import org.hibernate.loader.BatchLoadSizingStrategy;
+@@ -151,6 +152,10 @@ public abstract class Dialect implements ConversionContext {
+ 			"'",
+ 			Pattern.LITERAL
+ 	);
++
++	private static final Pattern ESCAPE_CLOSING_COMMENT_PATTERN = Pattern.compile( "\\*/" );
++	private static final Pattern ESCAPE_OPENING_COMMENT_PATTERN = Pattern.compile( "/\\*" );
++
+ 	public static final String TWO_SINGLE_QUOTES_REPLACEMENT = Matcher.quoteReplacement( "''" );
+ 
+ 	private final TypeNames typeNames = new TypeNames();
+@@ -3075,7 +3080,15 @@ public String addSqlHintOrComment(
+ 	}
+ 
+ 	protected String prependComment(String sql, String comment) {
+-		return  "/* " + comment + " */ " + sql;
++		return "/* " + escapeComment( comment ) + " */ " + sql;
++	}
++
++	public static String escapeComment(String comment) {
++		if ( StringHelper.isNotEmpty( comment ) ) {
++			final String escaped = ESCAPE_CLOSING_COMMENT_PATTERN.matcher( comment ).replaceAll( "*\\\\/" );
++			return ESCAPE_OPENING_COMMENT_PATTERN.matcher( escaped ).replaceAll( "/\\\\*" );
++		}
++		return comment;
+ 	}
+ 
+ 	public boolean supportsSelectAliasInGroupByClause() {
+diff --git a/hibernate-core/src/main/java/org/hibernate/loader/plan/exec/query/internal/SelectStatementBuilder.java b/hibernate-core/src/main/java/org/hibernate/loader/plan/exec/query/internal/SelectStatementBuilder.java
+index 3d2b1d8ac30..0a1f4df0ec7 100644
+--- a/hibernate-core/src/main/java/org/hibernate/loader/plan/exec/query/internal/SelectStatementBuilder.java
++++ b/hibernate-core/src/main/java/org/hibernate/loader/plan/exec/query/internal/SelectStatementBuilder.java
+@@ -187,7 +187,7 @@ public String toStatementString() {
+ 		StringBuilder buf = new StringBuilder( guesstimatedBufferSize );
+ 
+ 		if ( StringHelper.isNotEmpty( comment ) ) {
+-			buf.append( "/* " ).append( comment ).append( " */ " );
++			buf.append( "/* " ).append( Dialect.escapeComment( comment ) ).append( " */ " );
+ 		}
+ 
+ 		buf.append( "select " )
+diff --git a/hibernate-core/src/main/java/org/hibernate/sql/Delete.java b/hibernate-core/src/main/java/org/hibernate/sql/Delete.java
+index cd5affb8f3a..61d97c4a3b5 100644
+--- a/hibernate-core/src/main/java/org/hibernate/sql/Delete.java
++++ b/hibernate-core/src/main/java/org/hibernate/sql/Delete.java
+@@ -9,6 +9,8 @@
+ import java.util.LinkedHashMap;
+ import java.util.Map;
+ 
++import org.hibernate.dialect.Dialect;
++
+ /**
+  * An SQL <tt>DELETE</tt> statement
+  *
+@@ -36,7 +38,7 @@ public Delete setTableName(String tableName) {
+ 	public String toStatementString() {
+ 		StringBuilder buf = new StringBuilder( tableName.length() + 10 );
+ 		if ( comment!=null ) {
+-			buf.append( "/* " ).append(comment).append( " */ " );
++			buf.append( "/* " ).append( Dialect.escapeComment( comment ) ).append( " */ " );
+ 		}
+ 		buf.append( "delete from " ).append(tableName);
+ 		if ( where != null || !primaryKeyColumns.isEmpty() || versionColumnName != null ) {
+diff --git a/hibernate-core/src/main/java/org/hibernate/sql/Insert.java b/hibernate-core/src/main/java/org/hibernate/sql/Insert.java
+index 93083a90e13..a50afc29b07 100644
+--- a/hibernate-core/src/main/java/org/hibernate/sql/Insert.java
++++ b/hibernate-core/src/main/java/org/hibernate/sql/Insert.java
+@@ -94,7 +94,7 @@ public Insert setTableName(String tableName) {
+ 	public String toStatementString() {
+ 		StringBuilder buf = new StringBuilder( columns.size()*15 + tableName.length() + 10 );
+ 		if ( comment != null ) {
+-			buf.append( "/* " ).append( comment ).append( " */ " );
++			buf.append( "/* " ).append( Dialect.escapeComment( comment ) ).append( " */ " );
+ 		}
+ 		buf.append("insert into ")
+ 			.append(tableName);
+diff --git a/hibernate-core/src/main/java/org/hibernate/sql/InsertSelect.java b/hibernate-core/src/main/java/org/hibernate/sql/InsertSelect.java
+index fc8388b9828..f9382981217 100644
+--- a/hibernate-core/src/main/java/org/hibernate/sql/InsertSelect.java
++++ b/hibernate-core/src/main/java/org/hibernate/sql/InsertSelect.java
+@@ -68,7 +68,7 @@ public String toStatementString() {
+ 
+ 		StringBuilder buf = new StringBuilder( (columnNames.size() * 15) + tableName.length() + 10 );
+ 		if ( comment!=null ) {
+-			buf.append( "/* " ).append( comment ).append( " */ " );
++			buf.append( "/* " ).append( Dialect.escapeComment( comment ) ).append( " */ " );
+ 		}
+ 		buf.append( "insert into " ).append( tableName );
+ 		if ( !columnNames.isEmpty() ) {
+diff --git a/hibernate-core/src/main/java/org/hibernate/sql/QuerySelect.java b/hibernate-core/src/main/java/org/hibernate/sql/QuerySelect.java
+index 649d9735940..fc685182d8a 100644
+--- a/hibernate-core/src/main/java/org/hibernate/sql/QuerySelect.java
++++ b/hibernate-core/src/main/java/org/hibernate/sql/QuerySelect.java
+@@ -126,7 +126,7 @@ public void addOrderBy(String orderByString) {
+ 	public String toQueryString() {
+ 		StringBuilder buf = new StringBuilder( 50 );
+ 		if ( comment != null ) {
+-			buf.append( "/* " ).append( comment ).append( " */ " );
++			buf.append( "/* " ).append( Dialect.escapeComment( comment ) ).append( " */ " );
+ 		}
+ 		buf.append( "select " );
+ 		if ( distinct ) {
+diff --git a/hibernate-core/src/main/java/org/hibernate/sql/Select.java b/hibernate-core/src/main/java/org/hibernate/sql/Select.java
+index 30a516dfb88..11e13d86b2d 100644
+--- a/hibernate-core/src/main/java/org/hibernate/sql/Select.java
++++ b/hibernate-core/src/main/java/org/hibernate/sql/Select.java
+@@ -42,7 +42,7 @@ public Select(Dialect dialect) {
+ 	public String toStatementString() {
+ 		StringBuilder buf = new StringBuilder(guesstimatedBufferSize);
+ 		if ( StringHelper.isNotEmpty(comment) ) {
+-			buf.append("/* ").append(comment).append(" */ ");
++			buf.append( "/* " ).append( Dialect.escapeComment( comment ) ).append( " */ " );
+ 		}
+ 		
+ 		buf.append("select ").append(selectClause)
+diff --git a/hibernate-core/src/main/java/org/hibernate/sql/SimpleSelect.java b/hibernate-core/src/main/java/org/hibernate/sql/SimpleSelect.java
+index 46f96b71cdb..31b6aeed220 100644
+--- a/hibernate-core/src/main/java/org/hibernate/sql/SimpleSelect.java
++++ b/hibernate-core/src/main/java/org/hibernate/sql/SimpleSelect.java
+@@ -151,7 +151,7 @@ public String toStatementString() {
+ 		);
+ 
+ 		if ( comment != null ) {
+-			buf.append( "/* " ).append( comment ).append( " */ " );
++			buf.append( "/* " ).append( Dialect.escapeComment( comment ) ).append( " */ " );
+ 		}
+ 
+ 		buf.append( "select " );
+diff --git a/hibernate-core/src/main/java/org/hibernate/sql/Update.java b/hibernate-core/src/main/java/org/hibernate/sql/Update.java
+index 7b9a3fdae83..5dcb0fd7396 100644
+--- a/hibernate-core/src/main/java/org/hibernate/sql/Update.java
++++ b/hibernate-core/src/main/java/org/hibernate/sql/Update.java
+@@ -166,7 +166,7 @@ public Update setWhere(String where) {
+ 	public String toStatementString() {
+ 		StringBuilder buf = new StringBuilder( (columns.size() * 15) + tableName.length() + 10 );
+ 		if ( comment!=null ) {
+-			buf.append( "/* " ).append( comment ).append( " */ " );
++			buf.append( "/* " ).append( Dialect.escapeComment( comment ) ).append( " */ " );
+ 		}
+ 		buf.append( "update " ).append( tableName ).append( " set " );
+ 		boolean assignmentsAppended = false;
+diff --git a/hibernate-core/src/test/java/org/hibernate/test/comments/TestEntity.java b/hibernate-core/src/test/java/org/hibernate/test/comments/TestEntity.java
+new file mode 100644
+index 00000000000..7c425becc49
+--- /dev/null
++++ b/hibernate-core/src/test/java/org/hibernate/test/comments/TestEntity.java
+@@ -0,0 +1,46 @@
++/*
++ * Hibernate, Relational Persistence for Idiomatic Java
++ *
++ * License: GNU Lesser General Public License (LGPL), version 2.1 or later.
++ * See the lgpl.txt file in the root directory or <http://www.gnu.org/licenses/lgpl-2.1.html>.
++ */
++package org.hibernate.test.comments;
++
++import javax.persistence.Entity;
++import javax.persistence.Id;
++
++/**
++ * @author Andrea Boriero
++ */
++@Entity
++public class TestEntity {
++	@Id
++	private String id;
++
++	private String value;
++
++	public TestEntity() {
++
++	}
++
++	public TestEntity(String id, String value) {
++		this.id = id;
++		this.value = value;
++	}
++
++	public String getId() {
++		return id;
++	}
++
++	public void setId(String id) {
++		this.id = id;
++	}
++
++	public String getValue() {
++		return value;
++	}
++
++	public void setValue(String value) {
++		this.value = value;
++	}
++}
+diff --git a/hibernate-core/src/test/java/org/hibernate/test/comments/TestEntity2.java b/hibernate-core/src/test/java/org/hibernate/test/comments/TestEntity2.java
+new file mode 100644
+index 00000000000..58b626df603
+--- /dev/null
++++ b/hibernate-core/src/test/java/org/hibernate/test/comments/TestEntity2.java
+@@ -0,0 +1,37 @@
++/*
++ * Hibernate, Relational Persistence for Idiomatic Java
++ *
++ * License: GNU Lesser General Public License (LGPL), version 2.1 or later.
++ * See the lgpl.txt file in the root directory or <http://www.gnu.org/licenses/lgpl-2.1.html>.
++ */
++package org.hibernate.test.comments;
++
++import javax.persistence.Entity;
++import javax.persistence.Id;
++
++/**
++ * @author Andrea Boriero
++ */
++@Entity
++public class TestEntity2 {
++	@Id
++	private String id;
++
++	private String value;
++
++	public String getId() {
++		return id;
++	}
++
++	public void setId(String id) {
++		this.id = id;
++	}
++
++	public String getValue() {
++		return value;
++	}
++
++	public void setValue(String value) {
++		this.value = value;
++	}
++}
+diff --git a/hibernate-core/src/test/java/org/hibernate/test/comments/UseSqlCommentTest.java b/hibernate-core/src/test/java/org/hibernate/test/comments/UseSqlCommentTest.java
+new file mode 100644
+index 00000000000..2bd6adf8c8c
+--- /dev/null
++++ b/hibernate-core/src/test/java/org/hibernate/test/comments/UseSqlCommentTest.java
+@@ -0,0 +1,111 @@
++/*
++ * Hibernate, Relational Persistence for Idiomatic Java
++ *
++ * License: GNU Lesser General Public License (LGPL), version 2.1 or later.
++ * See the lgpl.txt file in the root directory or <http://www.gnu.org/licenses/lgpl-2.1.html>.
++ */
++package org.hibernate.test.comments;
++
++import java.util.List;
++import java.util.Map;
++import javax.persistence.EntityManager;
++import javax.persistence.TypedQuery;
++import javax.persistence.criteria.CompoundSelection;
++import javax.persistence.criteria.CriteriaBuilder;
++import javax.persistence.criteria.CriteriaQuery;
++import javax.persistence.criteria.Path;
++import javax.persistence.criteria.Root;
++
++import org.hibernate.cfg.AvailableSettings;
++import org.hibernate.jpa.test.BaseEntityManagerFunctionalTestCase;
++
++import org.junit.Before;
++import org.junit.Test;
++
++import static org.hamcrest.CoreMatchers.is;
++import static org.hibernate.testing.transaction.TransactionUtil.doInJPA;
++import static org.junit.Assert.assertThat;
++
++/**
++ * @author Andrea Boriero
++ */
++public class UseSqlCommentTest extends BaseEntityManagerFunctionalTestCase {
++
++	@Override
++	protected Class<?>[] getAnnotatedClasses() {
++		return new Class[] { TestEntity.class, TestEntity2.class };
++	}
++
++	@Override
++	protected void addMappings(Map settings) {
++		settings.put( AvailableSettings.USE_SQL_COMMENTS, "true" );
++		settings.put( AvailableSettings.FORMAT_SQL, "false" );
++	}
++
++	@Before
++	public void setUp() {
++		doInJPA( this::entityManagerFactory, entityManager -> {
++			TestEntity testEntity = new TestEntity();
++			testEntity.setId( "test1" );
++			testEntity.setValue( "value1" );
++			entityManager.persist( testEntity );
++
++			TestEntity2 testEntity2 = new TestEntity2();
++			testEntity2.setId( "test2" );
++			testEntity2.setValue( "value2" );
++			entityManager.persist( testEntity2 );
++		} );
++	}
++
++	@Test
++	public void testIt() {
++		String appendLiteral = "*/select id as col_0_0_,value as col_1_0_ from testEntity2 where 1=1 or id=?--/*";
++		doInJPA( this::entityManagerFactory, entityManager -> {
++
++			List<TestEntity> result = findUsingQuery( "test1", appendLiteral, entityManager );
++
++			TestEntity test1 = result.get( 0 );
++			assertThat( test1.getValue(), is( appendLiteral ) );
++		} );
++
++		doInJPA( this::entityManagerFactory, entityManager -> {
++
++			List<TestEntity> result = findUsingCriteria( "test1", appendLiteral, entityManager );
++
++			TestEntity test1 = result.get( 0 );
++			assertThat( test1.getValue(), is( appendLiteral ) );
++		} );
++	}
++
++	public List<TestEntity> findUsingCriteria(String id, String appendLiteral, EntityManager entityManager) {
++		CriteriaBuilder builder = entityManager.getCriteriaBuilder();
++		CriteriaQuery<TestEntity> criteria = builder.createQuery( TestEntity.class );
++		Root<TestEntity> root = criteria.from( TestEntity.class );
++
++		Path<Object> idPath = root.get( "id" );
++		CompoundSelection<TestEntity> selection = builder.construct(
++				TestEntity.class,
++				idPath,
++				builder.literal( appendLiteral )
++		);
++		criteria.select( selection );
++
++		criteria.where( builder.equal( idPath, builder.parameter( String.class, "where_id" ) ) );
++
++		TypedQuery<TestEntity> query = entityManager.createQuery( criteria );
++		query.setParameter( "where_id", id );
++		return query.getResultList();
++	}
++
++	public List<TestEntity> findUsingQuery(String id, String appendLiteral, EntityManager entityManager) {
++		TypedQuery<TestEntity> query =
++				entityManager.createQuery(
++						"select new org.hibernate.test.comments.TestEntity(id, '"
++								+ appendLiteral.replace( "'", "''" )
++								+ "') from TestEntity where id=:where_id",
++						TestEntity.class
++				);
++		query.setParameter( "where_id", id );
++		return query.getResultList();
++	}
++}

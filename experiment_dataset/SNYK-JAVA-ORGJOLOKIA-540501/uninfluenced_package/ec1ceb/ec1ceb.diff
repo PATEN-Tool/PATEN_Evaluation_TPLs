@@ -1,0 +1,483 @@
+diff --git a/agent/core/src/main/java/org/jolokia/backend/BackendManager.java b/agent/core/src/main/java/org/jolokia/backend/BackendManager.java
+index e4fd1089d..b5e0062a1 100644
+--- a/agent/core/src/main/java/org/jolokia/backend/BackendManager.java
++++ b/agent/core/src/main/java/org/jolokia/backend/BackendManager.java
+@@ -224,12 +224,13 @@ public boolean isRemoteAccessAllowed(String pRemoteHost, String pRemoteAddr) {
+     /**
+      * Check whether CORS access is allowed for the given origin.
+      *
+-     * @param pOrigin origin URL which needs to be checked
+-     * @param pStrictChecking whether to a strict check (i.e. server side check)
++     * @param pOrigin origin URL which needs to be checked. Can be null.
++     * @param pOnlyWhenStrictCheckingIsEnabled whether do the check only when strict-checking is enabled.
++     *                                         If true an no strict-checking is configured then always allow.
+      * @return true if if cors access is allowed
+      */
+-    public boolean isOriginAllowed(String pOrigin,boolean pStrictChecking) {
+-        return restrictor.isOriginAllowed(pOrigin, pStrictChecking);
++    public boolean isOriginAllowed(String pOrigin,boolean pOnlyWhenStrictCheckingIsEnabled) {
++        return restrictor.isOriginAllowed(pOrigin, pOnlyWhenStrictCheckingIsEnabled);
+     }
+ 
+     /**
+diff --git a/agent/core/src/main/java/org/jolokia/http/AgentServlet.java b/agent/core/src/main/java/org/jolokia/http/AgentServlet.java
+index a8acbe3d5..cdde8be5e 100755
+--- a/agent/core/src/main/java/org/jolokia/http/AgentServlet.java
++++ b/agent/core/src/main/java/org/jolokia/http/AgentServlet.java
+@@ -294,7 +294,7 @@ protected void doPost(HttpServletRequest req, HttpServletResponse resp)
+     protected void doOptions(HttpServletRequest req, HttpServletResponse resp) throws ServletException, IOException {
+         Map<String,String> responseHeaders =
+                 requestHandler.handleCorsPreflightRequest(
+-                        req.getHeader("Origin"),
++                        getOriginOrReferer(req),
+                         req.getHeader("Access-Control-Request-Headers"));
+         for (Map.Entry<String,String> entry : responseHeaders.entrySet()) {
+             resp.setHeader(entry.getKey(),entry.getValue());
+diff --git a/agent/core/src/main/java/org/jolokia/http/HttpRequestHandler.java b/agent/core/src/main/java/org/jolokia/http/HttpRequestHandler.java
+index cebed1c63..e9bde6a61 100644
+--- a/agent/core/src/main/java/org/jolokia/http/HttpRequestHandler.java
++++ b/agent/core/src/main/java/org/jolokia/http/HttpRequestHandler.java
+@@ -153,15 +153,15 @@ public JSONAware handlePostRequest(String pUri, InputStream pInputStream, String
+      */
+     public Map<String, String> handleCorsPreflightRequest(String pOrigin, String pRequestHeaders) {
+         Map<String,String> ret = new HashMap<String, String>();
+-        if (pOrigin != null && backendManager.isOriginAllowed(pOrigin,false)) {
++        if (backendManager.isOriginAllowed(pOrigin,false)) {
+             // CORS is allowed, we set exactly the origin in the header, so there are no problems with authentication
+-            ret.put("Access-Control-Allow-Origin","null".equals(pOrigin) ? "*" : pOrigin);
++            ret.put("Access-Control-Allow-Origin",pOrigin == null || "null".equals(pOrigin) ? "*" : pOrigin);
+             if (pRequestHeaders != null) {
+                 ret.put("Access-Control-Allow-Headers",pRequestHeaders);
+             }
+             // Fix for CORS with authentication (#104)
+             ret.put("Access-Control-Allow-Credentials","true");
+-            // Allow for one year. Changes in access.xml are reflected directly in the  cors request itself
++            // Allow for one year. Changes in access.xml are reflected directly in the CORS request itself
+             ret.put("Access-Control-Max-Age","" + 3600 * 24 * 365);
+         }
+         return ret;
+@@ -283,7 +283,7 @@ public void checkAccess(String pHost, String pAddress, String pOrigin) {
+         if (!backendManager.isRemoteAccessAllowed(pHost, pAddress)) {
+             throw new SecurityException("No access from client " + pAddress + " allowed");
+         }
+-        if (pOrigin != null && !backendManager.isOriginAllowed(pOrigin,true)) {
++        if (!backendManager.isOriginAllowed(pOrigin,true)) {
+             throw new SecurityException("Origin " + pOrigin + " is not allowed to call this agent");
+         }
+     }
+diff --git a/agent/core/src/main/java/org/jolokia/restrictor/AbstractConstantRestrictor.java b/agent/core/src/main/java/org/jolokia/restrictor/AbstractConstantRestrictor.java
+index 42a168542..29ffe399c 100644
+--- a/agent/core/src/main/java/org/jolokia/restrictor/AbstractConstantRestrictor.java
++++ b/agent/core/src/main/java/org/jolokia/restrictor/AbstractConstantRestrictor.java
+@@ -73,7 +73,7 @@ public boolean isRemoteAccessAllowed(String... pHostOrAddress) {
+     }
+ 
+     /** {@inheritDoc} */
+-    public boolean isOriginAllowed(String pOrigin, boolean pIsStrictCheck) {
++    public boolean isOriginAllowed(String pOrigin, boolean pOnlyWhenStrictCheckingIsEnabled) {
+         return isAllowed;
+     }
+ }
+diff --git a/agent/core/src/main/java/org/jolokia/restrictor/PolicyRestrictor.java b/agent/core/src/main/java/org/jolokia/restrictor/PolicyRestrictor.java
+index 54e77081d..e28a65d4c 100644
+--- a/agent/core/src/main/java/org/jolokia/restrictor/PolicyRestrictor.java
++++ b/agent/core/src/main/java/org/jolokia/restrictor/PolicyRestrictor.java
+@@ -120,13 +120,13 @@ public boolean isRemoteAccessAllowed(String ... pHostOrAddress) {
+     }
+ 
+     /** {@inheritDoc} */
+-    public boolean isOriginAllowed(String pOrigin, boolean pIsStrictCheck) {
+-        return corsChecker.check(pOrigin,pIsStrictCheck);
++    public boolean isOriginAllowed(String pOrigin, boolean pOnlyWhenStrictCheckingIsEnabled) {
++        return corsChecker.check(pOrigin, pOnlyWhenStrictCheckingIsEnabled);
+     }
+ 
+     /** {@inheritDoc} */
+     public boolean isAttributeReadAllowed(ObjectName pName, String pAttribute) {
+-        return check(RequestType.READ,pName,pAttribute);
++        return check(RequestType.READ, pName, pAttribute);
+     }
+ 
+     /** {@inheritDoc} */
+diff --git a/agent/core/src/main/java/org/jolokia/restrictor/Restrictor.java b/agent/core/src/main/java/org/jolokia/restrictor/Restrictor.java
+index ef4b17f62..9c7e84762 100644
+--- a/agent/core/src/main/java/org/jolokia/restrictor/Restrictor.java
++++ b/agent/core/src/main/java/org/jolokia/restrictor/Restrictor.java
+@@ -91,8 +91,8 @@ public interface Restrictor {
+      * for details
+      *
+      * @param pOrigin the "Origin:" header provided within the request
+-     * @param pIsStrictCheck whether doing a strict check
++     * @param pOnlyWhenStrictCheckingIsEnabled whether by-pass check when strict checking is disabled
+      * @return true if this cross browser request allowed, false otherwise
+      */
+-    boolean isOriginAllowed(String pOrigin, boolean pIsStrictCheck);
++    boolean isOriginAllowed(String pOrigin, boolean pOnlyWhenStrictCheckingIsEnabled);
+ }
+diff --git a/agent/core/src/main/java/org/jolokia/restrictor/policy/CorsChecker.java b/agent/core/src/main/java/org/jolokia/restrictor/policy/CorsChecker.java
+index 1d3139e27..8e71d03f5 100644
+--- a/agent/core/src/main/java/org/jolokia/restrictor/policy/CorsChecker.java
++++ b/agent/core/src/main/java/org/jolokia/restrictor/policy/CorsChecker.java
+@@ -79,16 +79,23 @@ public boolean check(String pArg) {
+         return check(pArg,false);
+     }
+ 
+-    public boolean check(String pOrigin, boolean pIsStrictCheck) {
++    public boolean check(String pOrigin, boolean pOnlyWhenStrictCheckingIsEnabled) {
+         // Method called during strict checking but we have not configured that
+         // So the check passes always.
+-        if (pIsStrictCheck && !strictChecking) {
++        if (pOnlyWhenStrictCheckingIsEnabled && !strictChecking) {
+             return true;
+         }
+ 
+-        if (patterns == null || patterns.size() == 0) {
++        // If strict checking is enabled but Origin is null, the don't allow. This can
++        // be the case when both Referer: and Origin: are set to null
++        if (pOrigin == null && strictChecking) {
++            return false;
++        }
++
++        if (patterns == null || patterns.size() == 0 || pOrigin == null) {
+             return true;
+         }
++
+         for (Pattern pattern : patterns) {
+             if (pattern.matcher(pOrigin).matches()) {
+                 return true;
+diff --git a/agent/core/src/test/java/org/jolokia/http/HttpRequestHandlerTest.java b/agent/core/src/test/java/org/jolokia/http/HttpRequestHandlerTest.java
+index b7e8f943f..d8583e076 100644
+--- a/agent/core/src/test/java/org/jolokia/http/HttpRequestHandlerTest.java
++++ b/agent/core/src/test/java/org/jolokia/http/HttpRequestHandlerTest.java
+@@ -63,6 +63,7 @@ public void tearDown() {
+     @Test
+     public void accessAllowed() {
+         expect(backend.isRemoteAccessAllowed("localhost","127.0.0.1")).andReturn(true);
++        expect(backend.isOriginAllowed((String) isNull(), eq(true))).andReturn(true);
+         replay(backend);
+ 
+         handler.checkAccess("localhost", "127.0.0.1",null);
+diff --git a/agent/core/src/test/java/org/jolokia/restrictor/PolicyBasedRestrictorTest.java b/agent/core/src/test/java/org/jolokia/restrictor/PolicyBasedRestrictorTest.java
+index 8b9609f0f..bb036ea3d 100644
+--- a/agent/core/src/test/java/org/jolokia/restrictor/PolicyBasedRestrictorTest.java
++++ b/agent/core/src/test/java/org/jolokia/restrictor/PolicyBasedRestrictorTest.java
+@@ -226,6 +226,7 @@ public void cors() {
+         PolicyRestrictor restrictor = new PolicyRestrictor(is);
+ 
+         for (boolean strict : new boolean[] {true, false}) {
++            assertFalse(restrictor.isOriginAllowed(null, strict));
+             assertTrue(restrictor.isOriginAllowed("http://bla.com", strict));
+             assertFalse(restrictor.isOriginAllowed("http://www.jolokia.org", strict));
+             assertTrue(restrictor.isOriginAllowed("https://www.consol.de", strict));
+@@ -238,6 +239,7 @@ public void corsStrictCheckingOff() {
+         PolicyRestrictor restrictor = new PolicyRestrictor(is);
+ 
+         // Allways true since we want a strict check but strict checking is off.
++        assertTrue(restrictor.isOriginAllowed(null, true));
+         assertTrue(restrictor.isOriginAllowed("http://bla.com", true));
+         assertTrue(restrictor.isOriginAllowed("http://www.jolokia.org", true));
+         assertTrue(restrictor.isOriginAllowed("https://www.consol.de", true));
+@@ -248,6 +250,7 @@ public void corsWildCard() {
+         InputStream is = getClass().getResourceAsStream("/allow-origin2.xml");
+         PolicyRestrictor restrictor = new PolicyRestrictor(is);
+ 
++        assertTrue(restrictor.isOriginAllowed(null, false));
+         assertTrue(restrictor.isOriginAllowed("http://bla.com", false));
+         assertTrue(restrictor.isOriginAllowed("http://www.jolokia.org", false));
+         assertTrue(restrictor.isOriginAllowed("http://www.consol.de", false));
+@@ -258,6 +261,7 @@ public void corsEmpty() {
+         InputStream is = getClass().getResourceAsStream("/allow-origin3.xml");
+         PolicyRestrictor restrictor = new PolicyRestrictor(is);
+ 
++        assertTrue(restrictor.isOriginAllowed(null, false));
+         assertTrue(restrictor.isOriginAllowed("http://bla.com", false));
+         assertTrue(restrictor.isOriginAllowed("http://www.jolokia.org", false));
+         assertTrue(restrictor.isOriginAllowed("http://www.consol.de", false));
+diff --git a/agent/core/src/test/java/org/jolokia/restrictor/TestRestrictor.java b/agent/core/src/test/java/org/jolokia/restrictor/TestRestrictor.java
+index c7dd6c15d..aeab7a7b7 100644
+--- a/agent/core/src/test/java/org/jolokia/restrictor/TestRestrictor.java
++++ b/agent/core/src/test/java/org/jolokia/restrictor/TestRestrictor.java
+@@ -34,7 +34,7 @@ public boolean isRemoteAccessAllowed(String... pHostOrAddress) {
+         return false;
+     }
+ 
+-    public boolean isOriginAllowed(String pOrigin, boolean pIsStrictCheck) {
++    public boolean isOriginAllowed(String pOrigin, boolean pOnlyWhenStrictCheckingIsEnabled) {
+         return false;
+     }
+ }
+diff --git a/agent/jvm/src/main/java/org/jolokia/jvmagent/handler/JolokiaHttpHandler.java b/agent/jvm/src/main/java/org/jolokia/jvmagent/handler/JolokiaHttpHandler.java
+index 83eb64d91..5e177cb00 100644
+--- a/agent/jvm/src/main/java/org/jolokia/jvmagent/handler/JolokiaHttpHandler.java
++++ b/agent/jvm/src/main/java/org/jolokia/jvmagent/handler/JolokiaHttpHandler.java
+@@ -293,7 +293,7 @@ private JSONAware executePostRequest(HttpExchange pExchange, ParsedUri pUri) thr
+     private void performCorsPreflightCheck(HttpExchange pExchange) {
+         Headers requestHeaders = pExchange.getRequestHeaders();
+         Map<String,String> respHeaders =
+-                requestHandler.handleCorsPreflightRequest(requestHeaders.getFirst("Origin"),
++                requestHandler.handleCorsPreflightRequest(extractOriginOrReferer(pExchange),
+                                                           requestHeaders.getFirst("Access-Control-Request-Headers"));
+         Headers responseHeaders = pExchange.getResponseHeaders();
+         for (Map.Entry<String,String> entry : respHeaders.entrySet()) {
+diff --git a/agent/jvm/src/test/java/org/jolokia/restrictor/TestRestrictorWithConfig.java b/agent/jvm/src/test/java/org/jolokia/restrictor/TestRestrictorWithConfig.java
+index 79cbe1dbb..7f670aaee 100644
+--- a/agent/jvm/src/test/java/org/jolokia/restrictor/TestRestrictorWithConfig.java
++++ b/agent/jvm/src/test/java/org/jolokia/restrictor/TestRestrictorWithConfig.java
+@@ -49,7 +49,7 @@ public boolean isRemoteAccessAllowed(String... pHostOrAddress) {
+     }
+ 
+     @Override
+-    public boolean isOriginAllowed(String pOrigin, boolean pIsStrictCheck) {
++    public boolean isOriginAllowed(String pOrigin, boolean pOnlyWhenStrictCheckingIsEnabled) {
+         return res;
+     }
+ }
+diff --git a/agent/osgi/src/main/java/org/jolokia/osgi/security/DelegatingRestrictor.java b/agent/osgi/src/main/java/org/jolokia/osgi/security/DelegatingRestrictor.java
+index 40ddb4d1d..a90b86c39 100644
+--- a/agent/osgi/src/main/java/org/jolokia/osgi/security/DelegatingRestrictor.java
++++ b/agent/osgi/src/main/java/org/jolokia/osgi/security/DelegatingRestrictor.java
+@@ -171,8 +171,8 @@ public boolean check(Restrictor restrictor, Object... args) {
+     };
+ 
+     /** {@inheritDoc} */
+-    public boolean isOriginAllowed(String pOrigin, boolean pIsStrictCheck) {
+-        return checkRestrictorService(CORS_CHECK,pOrigin,pIsStrictCheck);
++    public boolean isOriginAllowed(String pOrigin, boolean pOnlyWhenStrictCheckingIsEnabled) {
++        return checkRestrictorService(CORS_CHECK, pOrigin, pOnlyWhenStrictCheckingIsEnabled);
+     }
+ 
+     // =======================================================================================================
+diff --git a/agent/osgi/src/test/java/org/jolokia/osgi/security/DelegatingRestrictorTest.java b/agent/osgi/src/test/java/org/jolokia/osgi/security/DelegatingRestrictorTest.java
+index f3e154d15..2568e6e3f 100644
+--- a/agent/osgi/src/test/java/org/jolokia/osgi/security/DelegatingRestrictorTest.java
++++ b/agent/osgi/src/test/java/org/jolokia/osgi/security/DelegatingRestrictorTest.java
+@@ -132,7 +132,7 @@ public boolean isRemoteAccessAllowed(String... pHostOrAddress) {
+             return remote;
+         }
+ 
+-        public boolean isOriginAllowed(String pOrigin, boolean pIsStrictCheck) {
++        public boolean isOriginAllowed(String pOrigin, boolean pOnlyWhenStrictCheckingIsEnabled) {
+             return cors;
+         }
+     }
+diff --git a/client/javascript/test-app/pom.xml b/client/javascript/test-app/pom.xml
+index 05bfea62d..a19cee99a 100644
+--- a/client/javascript/test-app/pom.xml
++++ b/client/javascript/test-app/pom.xml
+@@ -20,7 +20,7 @@
+ 
+   <groupId>org.jolokia</groupId>
+   <artifactId>jolokia-client-javascript-test-app</artifactId>
+-  <version>1.4.0-SNAPSHOT</version>
++  <version>1.6.1-SNAPSHOT</version>
+   <name>jolokia-client-javascript-test-app</name>
+   <packaging>war</packaging>
+   <description>Test application for Jolokia's JavaScript client library</description>
+diff --git a/src/changes/changes.xml b/src/changes/changes.xml
+index 4c752f7ad..3618f023d 100644
+--- a/src/changes/changes.xml
++++ b/src/changes/changes.xml
+@@ -34,6 +34,9 @@
+         Add configuration option threadNamePrefix which will be used by jolokia http server executor
+         Default: "jolokia-"
+       </action>
++      <action dev="rhuss" type="fix">
++        When strict-checking is enabled for a CORS policy, then reject a request also when no Origin or Referer header is given.
++      </action>
+     </release>
+     <release version="1.6.0" description="Release 1.6.0" date="2018-06-25">
+       <action dev="rhuss" type="update">
+diff --git a/src/docbkx/security.xml b/src/docbkx/security.xml
+index f6724971c..a986eefc5 100644
+--- a/src/docbkx/security.xml
++++ b/src/docbkx/security.xml
+@@ -33,7 +33,7 @@
+       <para>
+         Access to MBean and to the Jolokia agents in general can be
+         restricted with an XML policy file. This policy can be configured
+-        for various parameters and is divided into several sections. 
++        for various parameters and is divided into several sections.
+       </para>
+       <section>
+         <title>IP based restrictions</title>
+@@ -55,7 +55,7 @@
+   <host>localhost</host>
+   <host>10.0.0.0/16</host>
+ </remote>
+-]]></programlisting>        
++]]></programlisting>
+       </section>
+       <section>
+         <title>Commands</title>
+@@ -68,57 +68,57 @@
+           selectively enabled for certain MBeans in the
+           <literal>&lt;allow&gt;</literal> section. If the
+           <literal>&lt;commands&gt;</literal> section is missing
+-          completely, access to all commands is allowed. 
++          completely, access to all commands is allowed.
+         </para>
+         <para>
+           All Jolokia commands described in <xref
+-          linkend="protocol"/> can be used in this section: 
++          linkend="protocol"/> can be used in this section:
+         </para>
+         <variablelist>
+           <varlistentry>
+             <term>read</term>
+             <listitem>
+               Reading of MBean attributes
+-            </listitem>        
++            </listitem>
+           </varlistentry>
+           <varlistentry>
+             <term>write</term>
+             <listitem>
+              Setting of MBean attributes
+-            </listitem>        
+-          </varlistentry>   
++            </listitem>
++          </varlistentry>
+           <varlistentry>
+             <term>exec</term>
+             <listitem>
+               Execution of JMX operations
+-            </listitem>        
++            </listitem>
+           </varlistentry>
+           <varlistentry>
+             <term>list</term>
+             <listitem>
+               List the available MBeans along with their supported
+-              attributes and operations. 
+-            </listitem>        
++              attributes and operations.
++            </listitem>
+           </varlistentry>
+           <varlistentry>
+             <term>search</term>
+             <listitem>
+               Searching for MBeans
+-            </listitem>        
++            </listitem>
+           </varlistentry>
+           <varlistentry>
+             <term>version</term>
+             <listitem>
+               Getting version and server information
+-            </listitem>        
+-          </varlistentry>          
++            </listitem>
++          </varlistentry>
+         </variablelist>
+         <para>
+           In the following example, access is granted to the
+           <literal>read</literal>, <literal>list</literal>,
+           <literal>search</literal> and <literal>version</literal> command, but
+           not to <literal>write</literal> and <literal>exec</literal>
+-          operations. 
++          operations.
+         </para>
+         <programlisting language="xml"><![CDATA[
+ <commands>
+@@ -148,7 +148,7 @@
+   <attribute>*Memory*</attribute>
+   <attribute mode="read">Verbose</attribute>
+   <operation>gc</operation>
+-</mbean>        
++</mbean>
+ ]]></programlisting>
+         <para>
+           Within the <literal>&lt;name&gt;</literal> section the name
+@@ -182,7 +182,7 @@
+         <programlisting><![CDATA[
+ <http>
+   <method>post</method>
+-</http>        
++</http>
+ ]]></programlisting>
+         <para>
+           It the <literal>&lt;http&gt;</literal> section is missing
+@@ -210,7 +210,7 @@
+           <literal>&lt;cors&gt;</literal> sections. This tags can
+           contain the origin URL provided by browsers with the
+           <literal>Origin:</literal> header literally or a
+-          wildcard specification with <literal>*</literal>.          
++          wildcard specification with <literal>*</literal>.
+         </para>
+         <programlisting language="xml"><![CDATA[
+ <cors>
+@@ -228,18 +228,21 @@
+           If the option <literal>&lt;strict-checking/&gt;</literal> is given in this section, too, then the given patterns
+           are not only used for CORS checking but also every request is checked on the server side whether the
+           <literal>Origin:</literal> or <literal>Referer:</literal> header matches one of the given patterns.
+-          This useful for protecting against Cross-Site Request Forgery.
++          If neither <literal>Origin:</literal> nor <literal>Referer:</literal> is given and strict checking is enabled, then the access is denied. This useful for protecting against Cross-Site Request Forgery.
++        </para>
++        <para>
++          Please note that <literal>&lt;strict-checking/&gt;</literal> might not be good enough because of potential browser bugs which could allow to forge the origin header. Examples of these issues are <ulink url="https://blog.bentkowski.info/2018/06/setting-arbitrary-request-headers-in.html">arbitrary header injection</ulink> or <ulink url="https://www.brokenbrowser.com/referer-spoofing-defeating-xss-filter/">referer and origin spoofing</ulink>. User facing application which uses Jolokia has backend should consider to implement additional measures like using the <ulink url="https://tools.ietf.org/html/draft-west-first-party-cookies-07">same-site</ulink> flag on the session cookie.
+         </para>
+       </section>
+       <section>
+         <title>Example for a security policy</title>
+         <para>
+           The following complete example applies various access
+-          restrictions: 
++          restrictions:
+         </para>
+         <itemizedlist>
+           <listitem>
+-            Access is only allowed for clients coming from localhost            
++            Access is only allowed for clients coming from localhost
+           </listitem>
+           <listitem>
+             Only HTTP Post requests are allowed
+@@ -255,7 +258,7 @@
+           <listitem>
+             Read access to the C3P0 connection pool is restricted to
+             forbid fetching the pool's properties, which in fact
+-            contains the DB password as clear text. 
++            contains the DB password as clear text.
+           </listitem>
+         </itemizedlist>
+         <programlisting><![CDATA[
+@@ -362,14 +365,14 @@
+         <classname>org.jolokia.restrictor.Restrictor</classname> and
+         comes with several implementations. The most prominent one is
+         the <classname>PolicyRestrictor</classname> which is described
+-        in <xref linkend="security-policy"/>. This is also the 
++        in <xref linkend="security-policy"/>. This is also the
+         restrictor which is active by default. For special needs, it is
+         possible to provide a custom implementation of this
+         interface for the WAR and OSGi agents. It is recommended to
+         subclass either
+         <classname>org.jolokia.restrictor.AllowAllRestrictor</classname>
+         or
+-        <classname>org.jolokia.restrictor.DenyAllRestrictor</classname>. 
++        <classname>org.jolokia.restrictor.DenyAllRestrictor</classname>.
+       </para>
+       <para>
+         For the WAR agent (<xref linkend="agents-war"/>), a subclass
+@@ -379,12 +382,12 @@
+       </para>
+       <programlisting language="java"><![CDATA[
+ public class RestrictedAgentServlet extends AgentServlet {
+-    
++
+     @Override
+     protected Restrictor createRestrictor(String policyLocation) {
+         return new MyOwnRestrictor();
+     }
+-}]]></programlisting>        
++}]]></programlisting>
+       <para>
+         <literal>policyLocation</literal> is a URL pointing to the
+         policy file, which is either the default value
+@@ -410,7 +413,7 @@ public class RestrictedAgentServlet extends AgentServlet {
+         exported and can be referenced from other
+         bundles. Additionally, the OSGi agent can also pick up a
+         restrictor as an OSGi service. See <xref
+-        linkend="agents-osgi"/> for details. 
++        linkend="agents-osgi"/> for details.
+       </para>
+ 
+     </section>

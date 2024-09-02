@@ -1,0 +1,95 @@
+diff --git a/core/src/main/java/com/orientechnologies/orient/core/config/OGlobalConfiguration.java b/core/src/main/java/com/orientechnologies/orient/core/config/OGlobalConfiguration.java
+index c4b85737a3..85c6c2692d 100755
+--- a/core/src/main/java/com/orientechnologies/orient/core/config/OGlobalConfiguration.java
++++ b/core/src/main/java/com/orientechnologies/orient/core/config/OGlobalConfiguration.java
+@@ -338,6 +338,9 @@ public enum OGlobalConfiguration {
+ 
+   NETWORK_HTTP_CONTENT_CHARSET("network.http.charset", "Http response charset", String.class, "utf-8"),
+ 
++  NETWORK_HTTP_JSONP_ENABLED("network.http.jsonp",
++      "Enable the usage of JSONP if requested by the client. The parameter name to use is 'callback'", Boolean.class, false),
++
+   OAUTH2_SECRETKEY("oauth2.secretkey", "Http OAuth2 secret key", String.class, "utf-8"), NETWORK_HTTP_SESSION_EXPIRE_TIMEOUT(
+       "network.http.sessionExpireTimeout", "Timeout after which an http session is considered tp have expired (seconds)",
+       Integer.class, 300),
+diff --git a/server/src/main/java/com/orientechnologies/orient/server/network/protocol/http/OHttpResponse.java b/server/src/main/java/com/orientechnologies/orient/server/network/protocol/http/OHttpResponse.java
+index e774d41387..1c51449d45 100755
+--- a/server/src/main/java/com/orientechnologies/orient/server/network/protocol/http/OHttpResponse.java
++++ b/server/src/main/java/com/orientechnologies/orient/server/network/protocol/http/OHttpResponse.java
+@@ -88,16 +88,12 @@ public OHttpResponse(final OutputStream iOutStream, final String iHttpVersion, f
+ 
+   public void send(final int iCode, final String iReason, final String iContentType, final Object iContent, final String iHeaders)
+       throws IOException {
+-    if (sendStarted)
+-    // AVOID TO SEND RESPONSE TWICE
+-    {
++    if (sendStarted) {
++      // AVOID TO SEND RESPONSE TWICE
+       return;
+     }
+     sendStarted = true;
+ 
+-    // final String content;
+-    // final String contentType;
+-
+     if (callbackFunction != null) {
+       content = callbackFunction + "(" + iContent + ")";
+       contentType = "text/javascript";
+diff --git a/server/src/main/java/com/orientechnologies/orient/server/network/protocol/http/ONetworkProtocolHttpAbstract.java b/server/src/main/java/com/orientechnologies/orient/server/network/protocol/http/ONetworkProtocolHttpAbstract.java
+index 64b1eaa018..909dc7946a 100755
+--- a/server/src/main/java/com/orientechnologies/orient/server/network/protocol/http/ONetworkProtocolHttpAbstract.java
++++ b/server/src/main/java/com/orientechnologies/orient/server/network/protocol/http/ONetworkProtocolHttpAbstract.java
+@@ -19,6 +19,21 @@
+  */
+ package com.orientechnologies.orient.server.network.protocol.http;
+ 
++import java.io.ByteArrayInputStream;
++import java.io.ByteArrayOutputStream;
++import java.io.IOException;
++import java.net.Socket;
++import java.net.SocketException;
++import java.net.SocketTimeoutException;
++import java.net.URLDecoder;
++import java.nio.charset.Charset;
++import java.util.Date;
++import java.util.HashMap;
++import java.util.IllegalFormatException;
++import java.util.InputMismatchException;
++import java.util.Map;
++import java.util.zip.GZIPInputStream;
++
+ import com.orientechnologies.common.concur.lock.OLockException;
+ import com.orientechnologies.common.log.OLogManager;
+ import com.orientechnologies.orient.core.Orient;
+@@ -58,21 +73,6 @@
+ import com.orientechnologies.orient.server.network.protocol.http.command.put.OServerCommandPutIndex;
+ import com.orientechnologies.orient.server.network.protocol.http.multipart.OHttpMultipartBaseInputStream;
+ 
+-import java.io.ByteArrayInputStream;
+-import java.io.ByteArrayOutputStream;
+-import java.io.IOException;
+-import java.net.Socket;
+-import java.net.SocketException;
+-import java.net.SocketTimeoutException;
+-import java.net.URLDecoder;
+-import java.nio.charset.Charset;
+-import java.util.Date;
+-import java.util.HashMap;
+-import java.util.IllegalFormatException;
+-import java.util.InputMismatchException;
+-import java.util.Map;
+-import java.util.zip.GZIPInputStream;
+-
+ public abstract class ONetworkProtocolHttpAbstract extends ONetworkProtocol {
+   private static final String          COMMAND_SEPARATOR = "|";
+   private static final Charset         utf8              = Charset.forName("utf8");
+@@ -128,7 +128,8 @@ public void service() throws ONetworkProtocolException, IOException {
+     connection.data.commandDetail = null;
+ 
+     final String callbackF;
+-    if ((request.parameters != null) && request.parameters.containsKey(OHttpUtils.CALLBACK_PARAMETER_NAME))
++    if (OGlobalConfiguration.NETWORK_HTTP_JSONP_ENABLED.getValueAsBoolean() && request.parameters != null
++        && request.parameters.containsKey(OHttpUtils.CALLBACK_PARAMETER_NAME))
+       callbackF = request.parameters.get(OHttpUtils.CALLBACK_PARAMETER_NAME);
+     else
+       callbackF = null;

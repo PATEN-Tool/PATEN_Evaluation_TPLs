@@ -1,0 +1,197 @@
+diff --git a/jetty-servlet/src/test/java/org/eclipse/jetty/servlet/DefaultServletTest.java b/jetty-servlet/src/test/java/org/eclipse/jetty/servlet/DefaultServletTest.java
+index 6916c87f669a..290332123a80 100644
+--- a/jetty-servlet/src/test/java/org/eclipse/jetty/servlet/DefaultServletTest.java
++++ b/jetty-servlet/src/test/java/org/eclipse/jetty/servlet/DefaultServletTest.java
+@@ -18,6 +18,11 @@
+ 
+ package org.eclipse.jetty.servlet;
+ 
++import static org.hamcrest.CoreMatchers.anyOf;
++import static org.hamcrest.CoreMatchers.containsString;
++import static org.hamcrest.CoreMatchers.is;
++import static org.hamcrest.CoreMatchers.not;
++import static org.junit.Assert.assertThat;
+ import static org.junit.Assert.assertTrue;
+ import static org.junit.Assume.assumeTrue;
+ 
+@@ -38,9 +43,11 @@
+ import javax.servlet.ServletException;
+ import javax.servlet.ServletRequest;
+ import javax.servlet.ServletResponse;
++import javax.servlet.http.HttpServletResponse;
+ 
+ import org.eclipse.jetty.http.DateGenerator;
+ import org.eclipse.jetty.http.HttpContent;
++import org.eclipse.jetty.http.HttpTester;
+ import org.eclipse.jetty.server.HttpConfiguration;
+ import org.eclipse.jetty.server.LocalConnector;
+ import org.eclipse.jetty.server.ResourceContentFactory;
+@@ -1248,6 +1255,19 @@ public void testCustomCompressionFormats() throws Exception
+         assertResponseContains("Content-Encoding: gzip",response);
+     }
+ 
++    @Test
++    public void testControlCharacter() throws Exception
++    {
++        FS.ensureDirExists(docRoot);
++        ServletHolder defholder = context.addServlet(DefaultServlet.class, "/");
++        defholder.setInitParameter("resourceBase", docRoot.getAbsolutePath());
++
++        String rawResponse = connector.getResponse("GET /context/%0a HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n");
++        HttpTester.Response response = HttpTester.parseResponse(rawResponse);
++        assertThat("Response.status", response.getStatus(), anyOf(is(HttpServletResponse.SC_NOT_FOUND), is(HttpServletResponse.SC_INTERNAL_SERVER_ERROR)));
++        assertThat("Response.content", response.getContent(), is(not(containsString(docRoot.toString()))));
++    }
++
+     @Test
+     public void testIfModifiedSmall() throws Exception
+     {
+diff --git a/jetty-util/src/main/java/org/eclipse/jetty/util/resource/PathResource.java b/jetty-util/src/main/java/org/eclipse/jetty/util/resource/PathResource.java
+index 6c7b33253771..e0c9ae4342b4 100644
+--- a/jetty-util/src/main/java/org/eclipse/jetty/util/resource/PathResource.java
++++ b/jetty-util/src/main/java/org/eclipse/jetty/util/resource/PathResource.java
+@@ -204,17 +204,24 @@ public PathResource(Path path)
+      * @param parent the parent path resource
+      * @param childPath the child sub path
+      */
+-    private PathResource(PathResource parent, String childPath) throws MalformedURLException
++    private PathResource(PathResource parent, String childPath)
+     {
+         // Calculate the URI and the path separately, so that any aliasing done by
+-        // FileSystem.getPath(path,childPath) is visiable as a difference to the URI
++        // FileSystem.getPath(path,childPath) is visible as a difference to the URI
+         // obtained via URIUtil.addDecodedPath(uri,childPath)
+ 
+-        this.path = parent.path.getFileSystem().getPath(parent.path.toString(), childPath);
+-        if (isDirectory() &&!childPath.endsWith("/"))
+-            childPath+="/";
+-        this.uri = URIUtil.addPath(parent.uri,childPath);
+-        this.alias = checkAliasPath();
++        try
++        {
++            this.path = parent.path.getFileSystem().getPath(parent.path.toString(), childPath);
++            if (isDirectory() && !childPath.endsWith("/"))
++                childPath += "/";
++            this.uri = URIUtil.addPath(parent.uri, childPath);
++            this.alias = checkAliasPath();
++        }
++        catch(InvalidPathException e)
++        {
++            throw (InvalidPathException) new InvalidPathException(childPath, e.getReason()).initCause(e);
++        }
+     }
+ 
+     /**
+@@ -242,10 +249,6 @@ public PathResource(URI uri) throws IOException
+         {
+             path = Paths.get(uri);
+         }
+-        catch (InvalidPathException e)
+-        {
+-            throw e;
+-        }
+         catch (IllegalArgumentException e)
+         {
+             throw e;
+@@ -286,7 +289,7 @@ public PathResource(URL url) throws IOException, URISyntaxException
+     }
+ 
+     @Override
+-    public Resource addPath(final String subpath) throws IOException, MalformedURLException
++    public Resource addPath(final String subpath) throws IOException
+     {
+         String cpath = URIUtil.canonicalPath(subpath);
+ 
+
+From ad4dceb1c08679baa2a6a64356fcde5309e13fd8 Mon Sep 17 00:00:00 2001
+From: Joakim Erdfelt <joakim.erdfelt@gmail.com>
+Date: Thu, 31 May 2018 11:31:36 -0500
+Subject: [PATCH 2/2] Issue #2560 - Moving InvalidPath logic from PathResource
+ to ResourceContentFactory
+
+Signed-off-by: Joakim Erdfelt <joakim.erdfelt@gmail.com>
+---
+ .../jetty/server/ResourceContentFactory.java  | 20 +++++++++++++------
+ .../jetty/servlet/DefaultServletTest.java     |  1 +
+ .../jetty/util/resource/PathResource.java     | 17 +++++-----------
+ 3 files changed, 20 insertions(+), 18 deletions(-)
+
+diff --git a/jetty-server/src/main/java/org/eclipse/jetty/server/ResourceContentFactory.java b/jetty-server/src/main/java/org/eclipse/jetty/server/ResourceContentFactory.java
+index ef8613d9004c..f89290bd6356 100644
+--- a/jetty-server/src/main/java/org/eclipse/jetty/server/ResourceContentFactory.java
++++ b/jetty-server/src/main/java/org/eclipse/jetty/server/ResourceContentFactory.java
+@@ -19,6 +19,7 @@
+ package org.eclipse.jetty.server;
+ 
+ import java.io.IOException;
++import java.nio.file.InvalidPathException;
+ import java.util.HashMap;
+ import java.util.Map;
+ 
+@@ -55,13 +56,20 @@ public ResourceContentFactory(ResourceFactory factory, MimeTypes mimeTypes, Comp
+     public HttpContent getContent(String pathInContext,int maxBufferSize)
+         throws IOException
+     {
+-        // try loading the content from our factory.
+-        Resource resource=_factory.getResource(pathInContext);
+-        HttpContent loaded = load(pathInContext,resource,maxBufferSize);
+-        return loaded;
++        try
++        {
++            // try loading the content from our factory.
++            Resource resource = _factory.getResource(pathInContext);
++            HttpContent loaded = load(pathInContext, resource, maxBufferSize);
++            return loaded;
++        }
++        catch (Throwable t)
++        {
++            // Any error has potential to reveal fully qualified path
++            throw (InvalidPathException) new InvalidPathException(pathInContext, "Invalid PathInContext").initCause(t);
++        }
+     }
+-    
+-    
++
+     /* ------------------------------------------------------------ */
+     private HttpContent load(String pathInContext, Resource resource, int maxBufferSize)
+         throws IOException
+diff --git a/jetty-servlet/src/test/java/org/eclipse/jetty/servlet/DefaultServletTest.java b/jetty-servlet/src/test/java/org/eclipse/jetty/servlet/DefaultServletTest.java
+index 290332123a80..c2449c7d7c03 100644
+--- a/jetty-servlet/src/test/java/org/eclipse/jetty/servlet/DefaultServletTest.java
++++ b/jetty-servlet/src/test/java/org/eclipse/jetty/servlet/DefaultServletTest.java
+@@ -1264,6 +1264,7 @@ public void testControlCharacter() throws Exception
+ 
+         String rawResponse = connector.getResponse("GET /context/%0a HTTP/1.1\r\nHost: local\r\nConnection: close\r\n\r\n");
+         HttpTester.Response response = HttpTester.parseResponse(rawResponse);
++        System.out.println(response + "\n" + response.getContent());
+         assertThat("Response.status", response.getStatus(), anyOf(is(HttpServletResponse.SC_NOT_FOUND), is(HttpServletResponse.SC_INTERNAL_SERVER_ERROR)));
+         assertThat("Response.content", response.getContent(), is(not(containsString(docRoot.toString()))));
+     }
+diff --git a/jetty-util/src/main/java/org/eclipse/jetty/util/resource/PathResource.java b/jetty-util/src/main/java/org/eclipse/jetty/util/resource/PathResource.java
+index e0c9ae4342b4..0dfb3ffd274e 100644
+--- a/jetty-util/src/main/java/org/eclipse/jetty/util/resource/PathResource.java
++++ b/jetty-util/src/main/java/org/eclipse/jetty/util/resource/PathResource.java
+@@ -210,18 +210,11 @@ private PathResource(PathResource parent, String childPath)
+         // FileSystem.getPath(path,childPath) is visible as a difference to the URI
+         // obtained via URIUtil.addDecodedPath(uri,childPath)
+ 
+-        try
+-        {
+-            this.path = parent.path.getFileSystem().getPath(parent.path.toString(), childPath);
+-            if (isDirectory() && !childPath.endsWith("/"))
+-                childPath += "/";
+-            this.uri = URIUtil.addPath(parent.uri, childPath);
+-            this.alias = checkAliasPath();
+-        }
+-        catch(InvalidPathException e)
+-        {
+-            throw (InvalidPathException) new InvalidPathException(childPath, e.getReason()).initCause(e);
+-        }
++        this.path = parent.path.getFileSystem().getPath(parent.path.toString(), childPath);
++        if (isDirectory() && !childPath.endsWith("/"))
++            childPath += "/";
++        this.uri = URIUtil.addPath(parent.uri, childPath);
++        this.alias = checkAliasPath();
+     }
+ 
+     /**

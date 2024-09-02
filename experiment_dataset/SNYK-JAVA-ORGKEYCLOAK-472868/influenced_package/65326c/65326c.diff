@@ -1,0 +1,224 @@
+diff --git a/core/src/main/java/org/keycloak/util/TokenUtil.java b/core/src/main/java/org/keycloak/util/TokenUtil.java
+index dd76ca1ee011..86eb10b15d4f 100644
+--- a/core/src/main/java/org/keycloak/util/TokenUtil.java
++++ b/core/src/main/java/org/keycloak/util/TokenUtil.java
+@@ -38,6 +38,8 @@ public class TokenUtil {
+ 
+     public static final String TOKEN_TYPE_BEARER = "Bearer";
+ 
++    public static final String TOKEN_TYPE_KEYCLOAK_ID = "Serialized-ID";
++
+     public static final String TOKEN_TYPE_ID = "ID";
+ 
+     public static final String TOKEN_TYPE_REFRESH = "Refresh";
+diff --git a/services/src/main/java/org/keycloak/services/managers/AuthenticationManager.java b/services/src/main/java/org/keycloak/services/managers/AuthenticationManager.java
+index 81cca62871ae..8ab1a2cea96c 100755
+--- a/services/src/main/java/org/keycloak/services/managers/AuthenticationManager.java
++++ b/services/src/main/java/org/keycloak/services/managers/AuthenticationManager.java
+@@ -20,6 +20,8 @@
+ import org.jboss.resteasy.spi.HttpRequest;
+ import org.keycloak.OAuth2Constants;
+ import org.keycloak.TokenVerifier;
++import org.keycloak.TokenVerifier.Predicate;
++import org.keycloak.TokenVerifier.TokenTypeCheck;
+ import org.keycloak.authentication.AuthenticationFlowError;
+ import org.keycloak.authentication.AuthenticationFlowException;
+ import org.keycloak.authentication.AuthenticationProcessor;
+@@ -123,6 +125,7 @@ public class AuthenticationManager {
+     public static final String KEYCLOAK_SESSION_COOKIE = "KEYCLOAK_SESSION";
+     public static final String KEYCLOAK_REMEMBER_ME = "KEYCLOAK_REMEMBER_ME";
+     public static final String KEYCLOAK_LOGOUT_PROTOCOL = "KEYCLOAK_LOGOUT_PROTOCOL";
++    private static final TokenTypeCheck VALIDATE_IDENTITY_COOKIE = new TokenTypeCheck(TokenUtil.TOKEN_TYPE_KEYCLOAK_ID);
+ 
+     public static boolean isSessionValid(RealmModel realm, UserSessionModel userSession) {
+         if (userSession == null) {
+@@ -170,7 +173,8 @@ public static void expireUserSessionCookie(KeycloakSession session, UserSessionM
+             TokenVerifier<AccessToken> verifier = TokenVerifier.create(tokenString, AccessToken.class)
+               .realmUrl(Urls.realmIssuer(uriInfo.getBaseUri(), realm.getName()))
+               .checkActive(false)
+-              .checkTokenType(false);
++              .checkTokenType(false)
++              .withChecks(VALIDATE_IDENTITY_COOKIE);
+ 
+             String kid = verifier.getHeader().getKeyId();
+             String algorithm = verifier.getHeader().getAlgorithm().name();
+@@ -580,6 +584,7 @@ public static IdentityCookieToken createIdentityToken(KeycloakSession keycloakSe
+         token.issuedNow();
+         token.subject(user.getId());
+         token.issuer(issuer);
++        token.type(TokenUtil.TOKEN_TYPE_KEYCLOAK_ID);
+ 
+         if (session != null) {
+             token.setSessionState(session.getId());
+@@ -719,7 +724,7 @@ public static AuthResult authenticateIdentityCookie(KeycloakSession session, Rea
+         }
+ 
+         String tokenString = cookie.getValue();
+-        AuthResult authResult = verifyIdentityToken(session, realm, session.getContext().getUri(), session.getContext().getConnection(), checkActive, false, true, tokenString, session.getContext().getRequestHeaders());
++        AuthResult authResult = verifyIdentityToken(session, realm, session.getContext().getUri(), session.getContext().getConnection(), checkActive, false, true, tokenString, session.getContext().getRequestHeaders(), VALIDATE_IDENTITY_COOKIE);
+         if (authResult == null) {
+             expireIdentityCookie(realm, session.getContext().getUri(), session.getContext().getConnection());
+             expireOldIdentityCookie(realm, session.getContext().getUri(), session.getContext().getConnection());
+@@ -1140,13 +1145,14 @@ public void ignore() {
+ 
+ 
+     public static AuthResult verifyIdentityToken(KeycloakSession session, RealmModel realm, UriInfo uriInfo, ClientConnection connection, boolean checkActive, boolean checkTokenType,
+-                                                    boolean isCookie, String tokenString, HttpHeaders headers) {
++                                                    boolean isCookie, String tokenString, HttpHeaders headers, Predicate<? super AccessToken>... additionalChecks) {
+         try {
+             TokenVerifier<AccessToken> verifier = TokenVerifier.create(tokenString, AccessToken.class)
+               .withDefaultChecks()
+               .realmUrl(Urls.realmIssuer(uriInfo.getBaseUri(), realm.getName()))
+               .checkActive(checkActive)
+-              .checkTokenType(checkTokenType);
++              .checkTokenType(checkTokenType)
++              .withChecks(additionalChecks);
+             String kid = verifier.getHeader().getKeyId();
+             String algorithm = verifier.getHeader().getAlgorithm().name();
+ 
+diff --git a/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/cookies/CookieTest.java b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/cookies/CookieTest.java
+new file mode 100644
+index 000000000000..c8242cb724ab
+--- /dev/null
++++ b/testsuite/integration-arquillian/tests/base/src/test/java/org/keycloak/testsuite/cookies/CookieTest.java
+@@ -0,0 +1,140 @@
++/*
++ * Copyright 2019 Red Hat, Inc. and/or its affiliates
++ * and other contributors as indicated by the @author tags.
++ * 
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ * 
++ * http://www.apache.org/licenses/LICENSE-2.0
++ * 
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.keycloak.testsuite.cookies;
++
++import org.keycloak.representations.idm.RealmRepresentation;
++import org.keycloak.services.managers.AuthenticationManager;
++import org.keycloak.testsuite.AbstractKeycloakTest;
++import org.keycloak.testsuite.auth.page.AuthRealm;
++import org.keycloak.testsuite.pages.LoginPage;
++import org.keycloak.testsuite.util.OAuthClient;
++import org.keycloak.testsuite.util.OAuthClient.AuthorizationEndpointResponse;
++import org.keycloak.testsuite.util.RealmBuilder;
++import java.util.List;
++import org.apache.http.client.methods.CloseableHttpResponse;
++import org.apache.http.client.methods.HttpGet;
++import org.apache.http.client.protocol.HttpClientContext;
++import org.apache.http.impl.client.BasicCookieStore;
++import org.apache.http.impl.client.CloseableHttpClient;
++import org.apache.http.impl.cookie.BasicClientCookie;
++import org.apache.http.protocol.BasicHttpContext;
++import org.apache.http.protocol.HttpContext;
++import org.apache.http.util.EntityUtils;
++import org.jboss.arquillian.graphene.page.Page;
++import org.junit.Test;
++import static org.hamcrest.Matchers.containsString;
++import static org.hamcrest.Matchers.not;
++import static org.junit.Assert.assertThat;
++import static org.keycloak.testsuite.admin.AbstractAdminTest.loadJson;
++
++/**
++ *
++ * @author hmlnarik
++ */
++public class CookieTest extends AbstractKeycloakTest {
++
++    @Page
++    protected LoginPage loginPage;
++
++    @Override
++    public void addTestRealms(List<RealmRepresentation> testRealms) {
++        RealmRepresentation realmRepresentation = loadJson(getClass().getResourceAsStream("/testrealm.json"), RealmRepresentation.class);
++        RealmBuilder realm = RealmBuilder.edit(realmRepresentation).testEventListener();
++        RealmRepresentation testRealm = realm.build();
++        testRealms.add(testRealm);
++    }
++
++    @Test
++    public void testCookieValue() throws Exception {
++        accountPage.setAuthRealm(AuthRealm.TEST);
++
++        final String accountClientId = realmsResouce().realm("test").clients().findByClientId("account").get(0).getId();
++        final String clientSecret = realmsResouce().realm("test").clients().get(accountClientId).getSecret().getValue();
++
++        AuthorizationEndpointResponse codeResponse = oauth.clientId("account").redirectUri(accountPage.buildUri().toString()).doLogin("test-user@localhost", "password");
++        OAuthClient.AccessTokenResponse accTokenResp = oauth.doAccessTokenRequest(codeResponse.getCode(), clientSecret);
++        String accessToken = accTokenResp.getAccessToken();
++
++        accountPage.navigateTo();
++        accountPage.assertCurrent();
++
++        try (CloseableHttpClient hc = OAuthClient.newCloseableHttpClient()) {
++            BasicCookieStore cookieStore = new BasicCookieStore();
++            BasicClientCookie cookie = new BasicClientCookie(AuthenticationManager.KEYCLOAK_IDENTITY_COOKIE, accessToken);
++            cookie.setDomain("localhost");
++            cookie.setPath("/");
++            cookieStore.addCookie(cookie);
++
++            HttpContext localContext = new BasicHttpContext();
++            localContext.setAttribute(HttpClientContext.COOKIE_STORE, cookieStore);
++
++            HttpGet get = new HttpGet(oauth.clientId("account").redirectUri(accountPage.buildUri().toString()).getLoginFormUrl());
++            try (CloseableHttpResponse resp = hc.execute(get, localContext)) {
++                final String pageContent = EntityUtils.toString(resp.getEntity());
++                
++                // Ensure that we did not get to the account page ...
++                assertThat(pageContent, not(containsString("First name")));
++                assertThat(pageContent, not(containsString("Last name")));
++
++                // ... but were redirected to login page
++                assertThat(pageContent, containsString("Log In"));
++                assertThat(pageContent, containsString("Forgot Password?"));
++            }
++        }
++    }
++
++    @Test
++    public void testCookieValueLoggedOut() throws Exception {
++        accountPage.setAuthRealm(AuthRealm.TEST);
++
++        final String accountClientId = realmsResouce().realm("test").clients().findByClientId("account").get(0).getId();
++        final String clientSecret = realmsResouce().realm("test").clients().get(accountClientId).getSecret().getValue();
++
++        AuthorizationEndpointResponse codeResponse = oauth.clientId("account").redirectUri(accountPage.buildUri().toString()).doLogin("test-user@localhost", "password");
++        OAuthClient.AccessTokenResponse accTokenResp = oauth.doAccessTokenRequest(codeResponse.getCode(), clientSecret);
++        String accessToken = accTokenResp.getAccessToken();
++
++        accountPage.navigateTo();
++        accountPage.assertCurrent();
++        accountPage.logOut();
++
++        try (CloseableHttpClient hc = OAuthClient.newCloseableHttpClient()) {
++            BasicCookieStore cookieStore = new BasicCookieStore();
++            BasicClientCookie cookie = new BasicClientCookie(AuthenticationManager.KEYCLOAK_IDENTITY_COOKIE, accessToken);
++            cookie.setDomain("localhost");
++            cookie.setPath("/");
++            cookieStore.addCookie(cookie);
++
++            HttpContext localContext = new BasicHttpContext();
++            localContext.setAttribute(HttpClientContext.COOKIE_STORE, cookieStore);
++
++            HttpGet get = new HttpGet(oauth.clientId("account").redirectUri(accountPage.buildUri().toString()).getLoginFormUrl());
++            try (CloseableHttpResponse resp = hc.execute(get, localContext)) {
++                final String pageContent = EntityUtils.toString(resp.getEntity());
++
++                // Ensure that we did not get to the account page ...
++                assertThat(pageContent, not(containsString("First name")));
++                assertThat(pageContent, not(containsString("Last name")));
++
++                // ... but were redirected to login page
++                assertThat(pageContent, containsString("Log In"));
++                assertThat(pageContent, containsString("Forgot Password?"));
++            }
++        }
++    }
++
++}

@@ -1,0 +1,92 @@
+// 
+// Decompiled by Procyon v0.5.36
+// 
+
+package org.elasticsearch.transport.local;
+
+import java.io.NotSerializableException;
+import org.elasticsearch.transport.NotSerializableTransportException;
+import java.io.OutputStream;
+import org.elasticsearch.util.io.ThrowableObjectOutputStream;
+import org.elasticsearch.transport.RemoteTransportException;
+import java.io.IOException;
+import org.elasticsearch.util.io.stream.HandlesStreamOutput;
+import org.elasticsearch.transport.TransportResponseHandler;
+import org.elasticsearch.util.io.stream.StreamOutput;
+import org.elasticsearch.transport.Transport;
+import org.elasticsearch.util.io.stream.BytesStreamOutput;
+import org.elasticsearch.util.io.stream.Streamable;
+import org.elasticsearch.transport.TransportChannel;
+
+public class LocalTransportChannel implements TransportChannel
+{
+    private final LocalTransport sourceTransport;
+    private final LocalTransport targetTransport;
+    private final String action;
+    private final long requestId;
+    
+    public LocalTransportChannel(final LocalTransport sourceTransport, final LocalTransport targetTransport, final String action, final long requestId) {
+        this.sourceTransport = sourceTransport;
+        this.targetTransport = targetTransport;
+        this.action = action;
+        this.requestId = requestId;
+    }
+    
+    @Override
+    public String action() {
+        return this.action;
+    }
+    
+    @Override
+    public void sendResponse(final Streamable message) throws IOException {
+        final HandlesStreamOutput stream = BytesStreamOutput.Cached.cachedHandles();
+        stream.writeLong(this.requestId);
+        byte status = 0;
+        status = Transport.Helper.setResponse(status);
+        stream.writeByte(status);
+        message.writeTo(stream);
+        final byte[] data = ((BytesStreamOutput)stream.wrappedOut()).copiedByteArray();
+        this.targetTransport.threadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                LocalTransportChannel.this.targetTransport.messageReceived(data, LocalTransportChannel.this.action, LocalTransportChannel.this.sourceTransport, null);
+            }
+        });
+    }
+    
+    @Override
+    public void sendResponse(final Throwable error) throws IOException {
+        BytesStreamOutput stream;
+        try {
+            stream = BytesStreamOutput.Cached.cached();
+            this.writeResponseExceptionHeader(stream);
+            final RemoteTransportException tx = new RemoteTransportException(this.targetTransport.nodeName(), this.targetTransport.boundAddress().boundAddress(), this.action, error);
+            final ThrowableObjectOutputStream too = new ThrowableObjectOutputStream(stream);
+            too.writeObject(tx);
+            too.close();
+        }
+        catch (NotSerializableException e) {
+            stream = BytesStreamOutput.Cached.cached();
+            this.writeResponseExceptionHeader(stream);
+            final RemoteTransportException tx2 = new RemoteTransportException(this.targetTransport.nodeName(), this.targetTransport.boundAddress().boundAddress(), this.action, new NotSerializableTransportException(error));
+            final ThrowableObjectOutputStream too2 = new ThrowableObjectOutputStream(stream);
+            too2.writeObject(tx2);
+            too2.close();
+        }
+        final byte[] data = stream.copiedByteArray();
+        this.targetTransport.threadPool().execute(new Runnable() {
+            @Override
+            public void run() {
+                LocalTransportChannel.this.targetTransport.messageReceived(data, LocalTransportChannel.this.action, LocalTransportChannel.this.sourceTransport, null);
+            }
+        });
+    }
+    
+    private void writeResponseExceptionHeader(final BytesStreamOutput stream) throws IOException {
+        stream.writeLong(this.requestId);
+        byte status = 0;
+        status = Transport.Helper.setResponse(status);
+        status = Transport.Helper.setError(status);
+        stream.writeByte(status);
+    }
+}

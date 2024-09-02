@@ -1,0 +1,610 @@
+diff --git a/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/FileUtils.java b/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/FileUtils.java
+index 0bfc083cabd..a3696eef754 100644
+--- a/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/FileUtils.java
++++ b/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/FileUtils.java
+@@ -16,6 +16,7 @@
+  */
+ package org.apache.nifi.util.file;
+ 
++import org.apache.nifi.util.security.MessageDigestUtils;
+ import org.slf4j.Logger;
+ 
+ import java.io.Closeable;
+@@ -31,8 +32,6 @@
+ import java.nio.channels.FileLock;
+ import java.nio.file.Files;
+ import java.nio.file.Path;
+-import java.security.MessageDigest;
+-import java.security.NoSuchAlgorithmException;
+ import java.util.Arrays;
+ import java.util.Collection;
+ import java.util.List;
+@@ -541,57 +540,30 @@ public static void syncWithRestore(final File primaryFile, final File restoreFil
+     }
+ 
+     /**
+-     * Returns true if the given files are the same according to their MD5 hash.
++     * Returns true if the given files are the same according to their hash.
+      *
+      * @param file1 a file
+      * @param file2 a file
+      * @return true if the files are the same; false otherwise
+-     * @throws IOException if the MD5 hash could not be computed
++     * @throws IOException if the hash could not be computed
+      */
+     public static boolean isSame(final File file1, final File file2) throws IOException {
+-        return Arrays.equals(computeMd5Digest(file1), computeMd5Digest(file2));
++        return Arrays.equals(computeDigest(file1), computeDigest(file2));
+     }
+ 
+     /**
+-     * Returns the MD5 hash of the given file.
++     * Returns the hash of the given file using default digest algorithm
+      *
+      * @param file a file
+-     * @return the MD5 hash
+-     * @throws IOException if the MD5 hash could not be computed
++     * @return Digest Hash Bytes
++     * @throws IOException if the hash could not be computed
+      */
+-    public static byte[] computeMd5Digest(final File file) throws IOException {
++    public static byte[] computeDigest(final File file) throws IOException {
+         try (final FileInputStream fis = new FileInputStream(file)) {
+-            return computeMd5Digest(fis);
++            return MessageDigestUtils.getDigest(fis);
+         }
+     }
+ 
+-    /**
+-     * Returns the MD5 hash of the given stream.
+-     *
+-     * @param stream an input stream
+-     * @return the MD5 hash
+-     * @throws IOException if the MD5 hash could not be computed
+-     */
+-    public static byte[] computeMd5Digest(final InputStream stream) throws IOException {
+-        final MessageDigest digest;
+-        try {
+-            digest = MessageDigest.getInstance("MD5");
+-        } catch (final NoSuchAlgorithmException nsae) {
+-            throw new IOException(nsae);
+-        }
+-
+-
+-        int len;
+-        final byte[] buffer = new byte[8192];
+-        while ((len = stream.read(buffer)) > -1) {
+-            if (len > 0) {
+-                digest.update(buffer, 0, len);
+-            }
+-        }
+-
+-        return digest.digest();
+-    }
+-
+     /**
+      * Returns the capacity for a given path
+      * @param path path
+diff --git a/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/classloader/ClassLoaderUtils.java b/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/classloader/ClassLoaderUtils.java
+index 0867bb9fa8d..07ff3e346a5 100644
+--- a/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/classloader/ClassLoaderUtils.java
++++ b/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/classloader/ClassLoaderUtils.java
+@@ -24,8 +24,6 @@
+ import java.net.URL;
+ import java.net.URLClassLoader;
+ import java.nio.charset.StandardCharsets;
+-import java.security.MessageDigest;
+-import java.security.NoSuchAlgorithmException;
+ import java.util.Arrays;
+ import java.util.Collections;
+ import java.util.LinkedHashSet;
+@@ -34,6 +32,8 @@
+ import java.util.Set;
+ import java.util.stream.Collectors;
+ import javax.xml.bind.DatatypeConverter;
++
++import org.apache.nifi.util.security.MessageDigestUtils;
+ import org.slf4j.Logger;
+ import org.slf4j.LoggerFactory;
+ 
+@@ -137,25 +137,20 @@ protected static URL[] toURLs(Set<String> modulePaths, FilenameFilter filenameFi
+         return additionalClasspath.toArray(new URL[additionalClasspath.size()]);
+     }
+ 
+-    public static String generateAdditionalUrlsFingerprint(Set<URL> urls) {
+-        List<String> listOfUrls = urls.stream().map(Object::toString).collect(Collectors.toList());
+-        StringBuffer urlBuffer = new StringBuffer();
++    /**
++     * Generate fingerprint from URLs associated with classpath resources
++     *
++     * @param urls URLs used for generating fingerprint string
++     * @return Fingerprint string from provided URLs
++     */
++    public static String generateAdditionalUrlsFingerprint(final Set<URL> urls) {
++        final StringBuilder formattedUrls = new StringBuilder();
+ 
+-        //Sorting so that the order is maintained for generating the fingerprint
+-        Collections.sort(listOfUrls);
+-        try {
+-            MessageDigest md = MessageDigest.getInstance("MD5");
+-            listOfUrls.forEach(url -> {
+-                urlBuffer.append(url).append("-").append(getLastModified(url)).append(";");
+-            });
+-            byte[] bytesOfAdditionalUrls = urlBuffer.toString().getBytes(StandardCharsets.UTF_8);
+-            byte[] bytesOfDigest = md.digest(bytesOfAdditionalUrls);
+-
+-            return DatatypeConverter.printHexBinary(bytesOfDigest);
+-        } catch (NoSuchAlgorithmException e) {
+-            LOGGER.error("Unable to generate fingerprint for the provided additional resources {}", new Object[]{urls, e});
+-            return null;
+-        }
++        final List<String> sortedUrls = urls.stream().map(Object::toString).sorted().collect(Collectors.toList());
++        sortedUrls.forEach(url -> formattedUrls.append(url).append("-").append(getLastModified(url)).append(";"));
++        final byte[] formattedUrlsBinary = formattedUrls.toString().getBytes(StandardCharsets.UTF_8);
++
++        return DatatypeConverter.printHexBinary(MessageDigestUtils.getDigest(formattedUrlsBinary));
+     }
+ 
+     private static long getLastModified(String url) {
+diff --git a/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/monitor/MD5SumMonitor.java b/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/monitor/DigestUpdateMonitor.java
+similarity index 60%
+rename from nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/monitor/MD5SumMonitor.java
+rename to nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/monitor/DigestUpdateMonitor.java
+index 8dea4bf46ad..a7649b0edb8 100644
+--- a/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/monitor/MD5SumMonitor.java
++++ b/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/file/monitor/DigestUpdateMonitor.java
+@@ -16,36 +16,21 @@
+  */
+ package org.apache.nifi.util.file.monitor;
+ 
++import org.apache.nifi.util.security.MessageDigestUtils;
++
+ import java.io.FileInputStream;
+ import java.io.IOException;
+ import java.nio.ByteBuffer;
+ import java.nio.file.Path;
+-import java.security.MessageDigest;
+-import java.security.NoSuchAlgorithmException;
+ 
+-public class MD5SumMonitor implements UpdateMonitor {
++public class DigestUpdateMonitor implements UpdateMonitor {
+ 
+     @Override
+     public Object getCurrentState(final Path path) throws IOException {
+-        final MessageDigest digest;
+-        try {
+-            digest = MessageDigest.getInstance("MD5");
+-        } catch (final NoSuchAlgorithmException nsae) {
+-            throw new AssertionError(nsae);
+-        }
+-
+         try (final FileInputStream fis = new FileInputStream(path.toFile())) {
+-            int len;
+-            final byte[] buffer = new byte[8192];
+-            while ((len = fis.read(buffer)) > -1) {
+-                if (len > 0) {
+-                    digest.update(buffer, 0, len);
+-                }
+-            }
++            final byte[] digest = MessageDigestUtils.getDigest(fis);
++            return ByteBuffer.wrap(digest);
+         }
+-
+-        // Return a ByteBuffer instead of byte[] because we want equals() to do a deep equality
+-        return ByteBuffer.wrap(digest.digest());
+     }
+ 
+ }
+diff --git a/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/security/MessageDigestUtils.java b/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/security/MessageDigestUtils.java
+new file mode 100644
+index 00000000000..896ab98932c
+--- /dev/null
++++ b/nifi-commons/nifi-utils/src/main/java/org/apache/nifi/util/security/MessageDigestUtils.java
+@@ -0,0 +1,80 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.nifi.util.security;
++
++import java.io.IOException;
++import java.io.InputStream;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++
++/**
++ * Message Digest Utilities for standardized algorithm use within the framework
++ */
++public final class MessageDigestUtils {
++    private static final String DIGEST_ALGORITHM = "SHA-256";
++
++    private static final int BUFFER_LENGTH = 1024;
++
++    private static final int START_READ_INDEX = 0;
++
++    private static final int STREAM_END_INDEX = -1;
++
++    private MessageDigestUtils() {
++
++    }
++
++    /**
++     * Get Digest using standard algorithm
++     *
++     * @param bytes Bytes to be digested
++     * @return Computed Digest Bytes
++     */
++    public static byte[] getDigest(final byte[] bytes) {
++        final MessageDigest messageDigest = getMessageDigest();
++        messageDigest.update(bytes);
++        return messageDigest.digest();
++    }
++
++    /**
++     * Get Digest using standard algorithm
++     *
++     * @param inputStream Input Stream to be read and digested
++     * @return Computed Digest Bytes
++     * @throws IOException Thrown on InputStream.read()
++     */
++    public static byte[] getDigest(final InputStream inputStream) throws IOException {
++        final MessageDigest messageDigest = getMessageDigest();
++
++        final byte[] buffer = new byte[BUFFER_LENGTH];
++        int bytesRead = inputStream.read(buffer, START_READ_INDEX, BUFFER_LENGTH);
++
++        while (bytesRead > STREAM_END_INDEX) {
++            messageDigest.update(buffer);
++            bytesRead = inputStream.read(buffer, START_READ_INDEX, BUFFER_LENGTH);
++        }
++
++        return messageDigest.digest();
++    }
++
++    private static MessageDigest getMessageDigest() {
++        try {
++            return MessageDigest.getInstance(DIGEST_ALGORITHM);
++        } catch (final NoSuchAlgorithmException e) {
++            throw new IllegalArgumentException(DIGEST_ALGORITHM, e);
++        }
++    }
++}
+diff --git a/nifi-commons/nifi-utils/src/test/java/org/apache/nifi/util/file/monitor/TestCompoundUpdateMonitor.java b/nifi-commons/nifi-utils/src/test/java/org/apache/nifi/util/file/monitor/TestCompoundUpdateMonitor.java
+index ec04efb70c6..2c92ba4ac09 100644
+--- a/nifi-commons/nifi-utils/src/test/java/org/apache/nifi/util/file/monitor/TestCompoundUpdateMonitor.java
++++ b/nifi-commons/nifi-utils/src/test/java/org/apache/nifi/util/file/monitor/TestCompoundUpdateMonitor.java
+@@ -34,8 +34,8 @@ public class TestCompoundUpdateMonitor {
+     @Test
+     public void test() throws IOException {
+         final UpdateMonitor lastModified = new LastModifiedMonitor();
+-        final MD5SumMonitor md5 = new MD5SumMonitor();
+-        final CompoundUpdateMonitor compound = new CompoundUpdateMonitor(lastModified, md5);
++        final DigestUpdateMonitor updateMonitor = new DigestUpdateMonitor();
++        final CompoundUpdateMonitor compound = new CompoundUpdateMonitor(lastModified, updateMonitor);
+ 
+         final File file = new File("target/" + UUID.randomUUID().toString());
+         if (file.exists()) {
+diff --git a/nifi-commons/nifi-utils/src/test/java/org/apache/nifi/util/file/monitor/TestSynchronousFileWatcher.java b/nifi-commons/nifi-utils/src/test/java/org/apache/nifi/util/file/monitor/TestSynchronousFileWatcher.java
+index 3440c165ef9..43abc5beda0 100644
+--- a/nifi-commons/nifi-utils/src/test/java/org/apache/nifi/util/file/monitor/TestSynchronousFileWatcher.java
++++ b/nifi-commons/nifi-utils/src/test/java/org/apache/nifi/util/file/monitor/TestSynchronousFileWatcher.java
+@@ -36,7 +36,7 @@ public class TestSynchronousFileWatcher {
+     public void testIt() throws UnsupportedEncodingException, IOException, InterruptedException {
+         final Path path = Paths.get("target/1.txt");
+         Files.copy(new ByteArrayInputStream("Hello, World!".getBytes("UTF-8")), path, StandardCopyOption.REPLACE_EXISTING);
+-        final UpdateMonitor monitor = new MD5SumMonitor();
++        final UpdateMonitor monitor = new DigestUpdateMonitor();
+ 
+         final SynchronousFileWatcher watcher = new SynchronousFileWatcher(path, monitor, 10L);
+         assertFalse(watcher.checkAndReset());
+diff --git a/nifi-nar-bundles/nifi-flume-bundle/nifi-flume-processors/src/test/java/org/apache/nifi/processors/flume/ExecuteFlumeSinkTest.java b/nifi-nar-bundles/nifi-flume-bundle/nifi-flume-processors/src/test/java/org/apache/nifi/processors/flume/ExecuteFlumeSinkTest.java
+index 4d3bf4e2a61..09ccdf0e975 100644
+--- a/nifi-nar-bundles/nifi-flume-bundle/nifi-flume-processors/src/test/java/org/apache/nifi/processors/flume/ExecuteFlumeSinkTest.java
++++ b/nifi-nar-bundles/nifi-flume-bundle/nifi-flume-processors/src/test/java/org/apache/nifi/processors/flume/ExecuteFlumeSinkTest.java
+@@ -38,6 +38,7 @@
+ import org.apache.nifi.util.TestRunner;
+ import org.apache.nifi.util.TestRunners;
+ import org.apache.nifi.util.file.FileUtils;
++import org.apache.nifi.util.security.MessageDigestUtils;
+ import org.junit.Assert;
+ import org.junit.Ignore;
+ import org.junit.Rule;
+@@ -158,12 +159,12 @@ public void testHdfsSink() throws IOException {
+         File[] files = destDir.listFiles((FilenameFilter)HiddenFileFilter.VISIBLE);
+         assertEquals("Unexpected number of destination files.", 1, files.length);
+         File dst = files[0];
+-        byte[] expectedMd5;
+-        try (InputStream md5Stream = getClass().getResourceAsStream("/testdata/records.txt")) {
+-            expectedMd5 = FileUtils.computeMd5Digest(md5Stream);
++        byte[] expectedDigest;
++        try (InputStream resourceStream = getClass().getResourceAsStream("/testdata/records.txt")) {
++            expectedDigest = MessageDigestUtils.getDigest(resourceStream);
+         }
+-        byte[] actualMd5 = FileUtils.computeMd5Digest(dst);
+-        Assert.assertArrayEquals("Destination file doesn't match source data", expectedMd5, actualMd5);
++        byte[] actualDigest = FileUtils.computeDigest(dst);
++        Assert.assertArrayEquals("Destination file doesn't match source data", expectedDigest, actualDigest);
+     }
+ 
+ }
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-nar-utils/src/main/java/org/apache/nifi/nar/FileDigestUtils.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-nar-utils/src/main/java/org/apache/nifi/nar/FileDigestUtils.java
+new file mode 100644
+index 00000000000..ab8495865f9
+--- /dev/null
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-nar-utils/src/main/java/org/apache/nifi/nar/FileDigestUtils.java
+@@ -0,0 +1,72 @@
++/*
++ * Licensed to the Apache Software Foundation (ASF) under one or more
++ * contributor license agreements.  See the NOTICE file distributed with
++ * this work for additional information regarding copyright ownership.
++ * The ASF licenses this file to You under the Apache License, Version 2.0
++ * (the "License"); you may not use this file except in compliance with
++ * the License.  You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++package org.apache.nifi.nar;
++
++import java.io.File;
++import java.io.FileInputStream;
++import java.io.IOException;
++import java.io.InputStream;
++import java.security.MessageDigest;
++import java.security.NoSuchAlgorithmException;
++
++/**
++ * File Digest Utilities for standardized algorithm use within NAR Unpacker
++ */
++public final class FileDigestUtils {
++    private static final String DIGEST_ALGORITHM = "SHA-256";
++
++    private static final int BUFFER_LENGTH = 1024;
++
++    private static final int START_READ_INDEX = 0;
++
++    private static final int STREAM_END_INDEX = -1;
++
++    private FileDigestUtils() {
++
++    }
++
++    /**
++     * Get Digest using standard algorithm
++     *
++     * @param file File to be read and digested
++     * @return Computed Digest Bytes
++     * @throws IOException Thrown on InputStream.read()
++     */
++    public static byte[] getDigest(final File file) throws IOException {
++        final MessageDigest messageDigest = getMessageDigest();
++
++        final byte[] buffer = new byte[BUFFER_LENGTH];
++
++        try (final InputStream inputStream = new FileInputStream(file)) {
++            int bytesRead = inputStream.read(buffer, START_READ_INDEX, BUFFER_LENGTH);
++            while (bytesRead > STREAM_END_INDEX) {
++                messageDigest.update(buffer);
++                bytesRead = inputStream.read(buffer, START_READ_INDEX, BUFFER_LENGTH);
++            }
++        }
++
++        return messageDigest.digest();
++    }
++
++    private static MessageDigest getMessageDigest() {
++        try {
++            return MessageDigest.getInstance(DIGEST_ALGORITHM);
++        } catch (final NoSuchAlgorithmException e) {
++            throw new IllegalArgumentException(DIGEST_ALGORITHM, e);
++        }
++    }
++}
+diff --git a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-nar-utils/src/main/java/org/apache/nifi/nar/NarUnpacker.java b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-nar-utils/src/main/java/org/apache/nifi/nar/NarUnpacker.java
+index fcfe5983c7b..cf41a3acb0a 100644
+--- a/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-nar-utils/src/main/java/org/apache/nifi/nar/NarUnpacker.java
++++ b/nifi-nar-bundles/nifi-framework-bundle/nifi-framework/nifi-nar-utils/src/main/java/org/apache/nifi/nar/NarUnpacker.java
+@@ -27,7 +27,6 @@
+ import java.io.BufferedReader;
+ import java.io.File;
+ import java.io.FileFilter;
+-import java.io.FileInputStream;
+ import java.io.FileOutputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
+@@ -35,8 +34,6 @@
+ import java.nio.file.Files;
+ import java.nio.file.Path;
+ import java.nio.file.Paths;
+-import java.security.MessageDigest;
+-import java.security.NoSuchAlgorithmException;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+ import java.util.Enumeration;
+@@ -60,7 +57,7 @@
+ public final class NarUnpacker {
+     public static final String BUNDLED_DEPENDENCIES_DIRECTORY = "NAR-INF/bundled-dependencies";
+     private static final Logger logger = LoggerFactory.getLogger(NarUnpacker.class);
+-    private static String HASH_FILENAME = "nar-md5sum";
++    private static final String HASH_FILENAME = "nar-digest";
+     private static final FileFilter NAR_FILTER = new FileFilter() {
+         @Override
+         public boolean accept(File pathname) {
+@@ -299,21 +296,21 @@ public static File unpackNar(final File nar, final File baseWorkingDirectory) th
+ 
+         // if the working directory doesn't exist, unpack the nar
+         if (!narWorkingDirectory.exists()) {
+-            unpack(nar, narWorkingDirectory, calculateMd5sum(nar));
++            unpack(nar, narWorkingDirectory, FileDigestUtils.getDigest(nar));
+         } else {
+-            // the working directory does exist. Run MD5 sum against the nar
++            // the working directory does exist. Run digest against the nar
+             // file and check if the nar has changed since it was deployed.
+-            final byte[] narMd5 = calculateMd5sum(nar);
++            final byte[] narDigest = FileDigestUtils.getDigest(nar);
+             final File workingHashFile = new File(narWorkingDirectory, HASH_FILENAME);
+             if (!workingHashFile.exists()) {
+                 FileUtils.deleteFile(narWorkingDirectory, true);
+-                unpack(nar, narWorkingDirectory, narMd5);
++                unpack(nar, narWorkingDirectory, narDigest);
+             } else {
+                 final byte[] hashFileContents = Files.readAllBytes(workingHashFile.toPath());
+-                if (!Arrays.equals(hashFileContents, narMd5)) {
++                if (!Arrays.equals(hashFileContents, narDigest)) {
+                     logger.info("Contents of nar {} have changed. Reloading.", new Object[] { nar.getAbsolutePath() });
+                     FileUtils.deleteFile(narWorkingDirectory, true);
+-                    unpack(nar, narWorkingDirectory, narMd5);
++                    unpack(nar, narWorkingDirectory, narDigest);
+                 }
+             }
+         }
+@@ -467,33 +464,6 @@ private static void makeFile(final InputStream inputStream, final File file) thr
+         }
+     }
+ 
+-    /**
+-     * Calculates an md5 sum of the specified file.
+-     *
+-     * @param file
+-     *            to calculate the md5sum of
+-     * @return the md5sum bytes
+-     * @throws IOException
+-     *             if cannot read file
+-     */
+-    private static byte[] calculateMd5sum(final File file) throws IOException {
+-        try (final FileInputStream inputStream = new FileInputStream(file)) {
+-            final MessageDigest md5 = MessageDigest.getInstance("md5");
+-
+-            final byte[] buffer = new byte[1024];
+-            int read = inputStream.read(buffer);
+-
+-            while (read > -1) {
+-                md5.update(buffer, 0, read);
+-                read = inputStream.read(buffer);
+-            }
+-
+-            return md5.digest();
+-        } catch (NoSuchAlgorithmException nsae) {
+-            throw new IllegalArgumentException(nsae);
+-        }
+-    }
+-
+     private NarUnpacker() {
+     }
+ }
+diff --git a/nifi-nar-bundles/nifi-scripting-bundle/nifi-scripting-processors/src/test/java/org/apache/nifi/processors/script/TestInvokeGroovy.java b/nifi-nar-bundles/nifi-scripting-bundle/nifi-scripting-processors/src/test/java/org/apache/nifi/processors/script/TestInvokeGroovy.java
+index 4e8c58da1a0..7934aae39ec 100644
+--- a/nifi-nar-bundles/nifi-scripting-bundle/nifi-scripting-processors/src/test/java/org/apache/nifi/processors/script/TestInvokeGroovy.java
++++ b/nifi-nar-bundles/nifi-scripting-bundle/nifi-scripting-processors/src/test/java/org/apache/nifi/processors/script/TestInvokeGroovy.java
+@@ -29,11 +29,11 @@
+ import org.apache.nifi.util.MockValidationContext;
+ import org.apache.nifi.util.TestRunner;
+ import org.apache.nifi.util.TestRunners;
++import org.apache.nifi.util.security.MessageDigestUtils;
+ import org.junit.Before;
+ import org.junit.Test;
+ 
+ import java.nio.charset.StandardCharsets;
+-import java.security.MessageDigest;
+ import java.util.List;
+ import java.util.Set;
+ 
+@@ -207,7 +207,7 @@ public void testAbstractProcessorImplementationWithBodyScriptFile() throws Excep
+         runner.assertAllFlowFilesTransferred("success", 1);
+         final List<MockFlowFile> result = runner.getFlowFilesForRelationship("success");
+         assertTrue(result.size() == 1);
+-        final String expectedOutput = new String(Hex.encodeHex(MessageDigest.getInstance("MD5").digest("testbla bla".getBytes())));
++        final String expectedOutput = new String(Hex.encodeHex(MessageDigestUtils.getDigest("testbla bla".getBytes())));
+         final MockFlowFile outputFlowFile = result.get(0);
+         outputFlowFile.assertContentEquals(expectedOutput);
+         outputFlowFile.assertAttributeEquals("outAttr", expectedOutput);
+diff --git a/nifi-nar-bundles/nifi-scripting-bundle/nifi-scripting-processors/src/test/resources/groovy/test_implementingabstractProcessor.groovy b/nifi-nar-bundles/nifi-scripting-bundle/nifi-scripting-processors/src/test/resources/groovy/test_implementingabstractProcessor.groovy
+index 1c00879e151..ef4da44b38c 100644
+--- a/nifi-nar-bundles/nifi-scripting-bundle/nifi-scripting-processors/src/test/resources/groovy/test_implementingabstractProcessor.groovy
++++ b/nifi-nar-bundles/nifi-scripting-bundle/nifi-scripting-processors/src/test/resources/groovy/test_implementingabstractProcessor.groovy
+@@ -29,9 +29,7 @@ import org.apache.nifi.processor.io.InputStreamCallback
+ import org.apache.nifi.processor.io.OutputStreamCallback
+ import org.apache.nifi.processor.util.StandardValidators
+ import org.apache.nifi.stream.io.StreamUtils
+-
+-import java.security.MessageDigest
+-
++import org.apache.nifi.util.security.MessageDigestUtils
+ 
+ class TestAbstractProcessor extends AbstractProcessor {
+ 
+@@ -88,20 +86,20 @@ class TestAbstractProcessor extends AbstractProcessor {
+ 			}
+ 		});
+ 		final String content = new String(buff);
+-		final String md5 = generateMD5_A(content + myCustomPropValue);
+-		requestFlowFile = session.putAttribute(requestFlowFile, attr, md5);
++		final String digest = generateDigest(content + myCustomPropValue);
++		requestFlowFile = session.putAttribute(requestFlowFile, attr, digest);
+ 		requestFlowFile = session.write(requestFlowFile, new OutputStreamCallback() {
+ 			@Override
+ 			public void process(OutputStream out) throws IOException {
+-				out.write(md5.getBytes());
++				out.write(digest.getBytes());
+ 			}
+ 		});
+ 
+ 		session.transfer(requestFlowFile, REL_SUCCESS);
+ 	}
+ 
+-    static def generateMD5_A(String s){
+-        new String(Hex.encodeHex(MessageDigest.getInstance("MD5").digest(s.bytes)));
++    static def generateDigest(String s){
++        new String(Hex.encodeHex(MessageDigestUtils.getDigest(s.bytes)));
+ 	}
+ }
+ 
+diff --git a/nifi-nar-bundles/nifi-standard-services/nifi-hwx-schema-registry-bundle/nifi-hwx-schema-registry-service/src/main/java/com/hortonworks/registries/schemaregistry/client/SchemaRegistryClient.java b/nifi-nar-bundles/nifi-standard-services/nifi-hwx-schema-registry-bundle/nifi-hwx-schema-registry-service/src/main/java/com/hortonworks/registries/schemaregistry/client/SchemaRegistryClient.java
+index 8162f6d4410..891af56a11d 100644
+--- a/nifi-nar-bundles/nifi-standard-services/nifi-hwx-schema-registry-bundle/nifi-hwx-schema-registry-service/src/main/java/com/hortonworks/registries/schemaregistry/client/SchemaRegistryClient.java
++++ b/nifi-nar-bundles/nifi-standard-services/nifi-hwx-schema-registry-bundle/nifi-hwx-schema-registry-service/src/main/java/com/hortonworks/registries/schemaregistry/client/SchemaRegistryClient.java
+@@ -60,6 +60,7 @@
+ import com.hortonworks.registries.schemaregistry.state.SchemaLifecycleException;
+ import com.hortonworks.registries.schemaregistry.state.SchemaVersionLifecycleStateMachineInfo;
+ import org.apache.commons.io.IOUtils;
++import org.apache.nifi.util.security.MessageDigestUtils;
+ import org.glassfish.jersey.SslConfigurator;
+ import org.glassfish.jersey.client.ClientConfig;
+ import org.glassfish.jersey.client.ClientProperties;
+@@ -93,8 +94,6 @@
+ import java.lang.reflect.InvocationTargetException;
+ import java.lang.reflect.Proxy;
+ import java.net.URLEncoder;
+-import java.security.MessageDigest;
+-import java.security.NoSuchAlgorithmException;
+ import java.security.PrivilegedAction;
+ import java.util.ArrayList;
+ import java.util.Arrays;
+@@ -572,8 +571,8 @@ public Response run() {
+     private SchemaDigestEntry buildSchemaTextEntry(SchemaVersion schemaVersion, String name) {
+         byte[] digest;
+         try {
+-            digest = MessageDigest.getInstance("MD5").digest(schemaVersion.getSchemaText().getBytes("UTF-8"));
+-        } catch (NoSuchAlgorithmException | UnsupportedEncodingException e) {
++            digest = MessageDigestUtils.getDigest(schemaVersion.getSchemaText().getBytes("UTF-8"));
++        } catch (UnsupportedEncodingException e) {
+             throw new RuntimeException(e.getMessage(), e);
+         }
+ 
